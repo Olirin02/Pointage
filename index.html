@@ -1,0 +1,1377 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Pointage">
+<meta name="theme-color" content="#141926">
+<title>Pointage</title>
+<link rel="manifest" href="manifest.json">
+
+<!-- React + Babel -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0b0f1a; }
+  #root { min-height: 100vh; }
+  #loading {
+    position: fixed; inset: 0; background: #0b0f1a;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    color: #6366f1; font-family: sans-serif; gap: 16px;
+    transition: opacity 0.3s;
+  }
+  #loading .spinner {
+    width: 36px; height: 36px; border: 3px solid #252f45;
+    border-top-color: #6366f1; border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div id="loading">
+  <div class="spinner"></div>
+  <span style="font-size:14px;opacity:.7">Chargement…</span>
+</div>
+
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef } = React;
+
+
+
+/* ─────────────────────────────────────────────
+   UTILITIES
+───────────────────────────────────────────── */
+const pad = n => String(n).padStart(2, "0");
+const parseTime = t => {
+  if (!t) return null;
+  const [h, m] = t.split(":").map(Number);
+  return h * 60 + m;
+};
+const fmtHours = h => {
+  const sign = h < 0 ? "−" : "+";
+  const abs = Math.abs(h);
+  const hh = Math.floor(abs);
+  const mm = Math.round((abs - hh) * 60);
+  return `${sign}${hh}h${pad(mm)}`;
+};
+const fmtWorked = h => {
+  const abs = Math.abs(h);
+  const hh = Math.floor(abs);
+  const mm = Math.round((abs - hh) * 60);
+  return `${hh}h${pad(mm)}`;
+};
+const fmtDate = s => {
+  if (!s) return "";
+  const [y, m, d] = s.split("-");
+  return `${d}/${m}/${y}`;
+};
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const nowTime = () => {
+  const d = new Date();
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+const roundNearest = t => {
+  if (!t) return t;
+  const [h, m] = t.split(":").map(Number);
+  const total = h * 60 + m;
+  const r = Math.round(total / 15) * 15;
+  return `${pad(Math.floor(r / 60))}:${pad(r % 60)}`;
+};
+const roundFloor = t => {
+  if (!t) return t;
+  const [h, m] = t.split(":").map(Number);
+  const total = h * 60 + m;
+  const r = Math.floor(total / 15) * 15;
+  return `${pad(Math.floor(r / 60))}:${pad(r % 60)}`;
+};
+const roundCeil = t => {
+  if (!t) return t;
+  const [h, m] = t.split(":").map(Number);
+  const total = h * 60 + m;
+  const r = Math.ceil(total / 15) * 15;
+  return `${pad(Math.floor(r / 60))}:${pad(r % 60)}`;
+};
+const applyRound = (t, mode) => {
+  if (mode === "floor")   return roundFloor(t);
+  if (mode === "ceil")    return roundCeil(t);
+  if (mode === "nearest") return roundNearest(t);
+  return t; // "none" → heure exacte
+};
+
+const calcWorked = (arrival, departure, brk) => {
+  const a = parseTime(arrival), d = parseTime(departure);
+  if (a === null || d === null) return 0;
+  return Math.max(0, (d - a - (brk || 0)) / 60);
+};
+const getWeekStart = d => {
+  const dt = new Date(d + "T12:00:00");
+  const day = dt.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  dt.setDate(dt.getDate() + diff);
+  return dt.toISOString().slice(0, 10);
+};
+const getWeekNum = d => {
+  const dt = new Date(d + "T12:00:00");
+  dt.setHours(0, 0, 0, 0);
+  dt.setDate(dt.getDate() + 3 - ((dt.getDay() + 6) % 7));
+  const week1 = new Date(dt.getFullYear(), 0, 4);
+  return 1 + Math.round(((dt - week1) / 86400000 - 3 + ((week1.getDay() + 6) % 7)) / 7);
+};
+const uid = () => Math.random().toString(36).slice(2, 9);
+
+/* ─── Jours fériés français ─────────────────────────────────────────────── */
+const getEaster = year => {
+  const a = year % 19, b = Math.floor(year / 100), c = year % 100;
+  const d = Math.floor(b / 4), e = b % 4, f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4), k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day   = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(year, month - 1, day);
+};
+const shiftDate = (d, n) => { const r = new Date(d); r.setDate(r.getDate() + n); return r; };
+const d2s = d => d.toISOString().slice(0, 10);
+
+const getFrenchHolidays = year => {
+  const p = getEaster(year);
+  return {
+    [`${year}-01-01`]:          "Jour de l'An",
+    [d2s(shiftDate(p,  1))]:   "Lundi de Pâques",
+    [`${year}-05-01`]:          "Fête du Travail",
+    [`${year}-05-08`]:          "Victoire 1945",
+    [d2s(shiftDate(p, 39))]:   "Ascension",
+    // Lundi de Pentecôte (p+50) exclu — traité comme journée normale
+    [`${year}-07-14`]:          "Fête Nationale",
+    [`${year}-08-15`]:          "Assomption",
+    [`${year}-11-01`]:          "Toussaint",
+    [`${year}-11-11`]:          "Armistice",
+    [`${year}-12-25`]:          "Noël",
+  };
+};
+
+// Génère les entrées virtuelles de jours fériés (lun-ven, non pointés, depuis début contrat)
+const buildHolidayEntries = (entries, settings) => {
+  const entryDates = new Set(entries.map(e => e.date));
+  const start = new Date(settings.contractStartDate + "T12:00:00");
+  const end   = new Date(todayStr() + "T12:00:00");
+  const startY = start.getFullYear(), endY = end.getFullYear();
+  const map = {};
+  for (let y = startY; y <= endY; y++) Object.assign(map, getFrenchHolidays(y));
+  return Object.entries(map)
+    .filter(([date]) => {
+      const dt = new Date(date + "T12:00:00");
+      const dow = dt.getDay();
+      return dt >= start && dt <= end && dow !== 0 && dow !== 6 && !entryDates.has(date);
+    })
+    .map(([date, name]) => ({ id: `ferie_${date}`, date, isHoliday: true, name, type: "ferie" }));
+};
+
+// Génère les entrées virtuelles pour congés payés et arrêts maladie (lun-ven, hors fériés/pointages)
+const buildLeaveVirtualEntries = (entries, leaves, sickLeaves, holidayEntries) => {
+  const blocked = new Set([
+    ...entries.map(e => e.date),
+    ...holidayEntries.map(e => e.date),
+  ]);
+  const result = [];
+  const addPeriod = (start, end, type) => {
+    const cur = new Date(start + "T12:00:00");
+    const fin = new Date(end   + "T12:00:00");
+    while (cur <= fin) {
+      const dateStr = d2s(cur);
+      const dow = cur.getDay();
+      if (dow !== 0 && dow !== 6 && !blocked.has(dateStr)) {
+        result.push({ id: `${type}_${dateStr}`, date: dateStr, isLeave: true, leaveType: type, type });
+        blocked.add(dateStr);
+      }
+      cur.setDate(cur.getDate() + 1);
+    }
+  };
+  leaves.forEach(l => addPeriod(l.start, l.end, "conge"));
+  sickLeaves.forEach(l => addPeriod(l.start, l.end, "maladie"));
+  return result;
+};
+
+// Génère les entrées virtuelles pour les jours ouvrés non pointés (contribution −hoursPerDay)
+const buildMissingDayEntries = (entries, holidayEntries, leaveEntries, settings) => {
+  const accounted = new Set([
+    ...entries.map(e => e.date),
+    ...holidayEntries.map(e => e.date),
+    ...leaveEntries.map(e => e.date),
+  ]);
+  const start = new Date(settings.contractStartDate + "T12:00:00");
+  const today = new Date(todayStr() + "T12:00:00");
+  const result = [];
+  const cur = new Date(start);
+  while (cur <= today) {
+    const dateStr = d2s(cur);
+    const dow = cur.getDay();
+    if (dow !== 0 && dow !== 6 && !accounted.has(dateStr)) {
+      result.push({ id: `absent_${dateStr}`, date: dateStr, isMissing: true, type: "absent" });
+    }
+    cur.setDate(cur.getDate() + 1);
+  }
+  return result;
+};
+
+// Jour majoré à 100 % : jour férié (liste officielle) OU dimanche
+const isBonusDay = date => {
+  const dt = new Date(date + "T12:00:00");
+  if (dt.getDay() === 0) return true; // dimanche
+  return date in getFrenchHolidays(dt.getFullYear());
+};
+
+// Calcule les heures d'une entrée avec majoration éventuelle
+const calcWorkedE = (e, hoursPerDay) => {
+  if (e.isHoliday || e.isLeave) return hoursPerDay; // férié/congé/maladie = journée normale
+  if (e.isMissing) return 0;                         // jour non pointé = 0h travaillées
+  if (e.type === "rattrapage") return 0;             // repos pris en compensation = 0h produites
+  const raw = calcWorked(e.arrival, e.departure, e.brk);
+  return isBonusDay(e.date) ? raw * 2 : raw;
+};
+
+// Heures attendues pour une entrée :
+// Sam/Dim = 0 (hors contrat), Lun-Ven et entrées virtuelles = hoursPerDay
+// Rattrapage = heures de repos prises (déduit du solde)
+const expectedHours = (e, hoursPerDay) => {
+  if (e.isHoliday || e.isLeave || e.isMissing) return hoursPerDay;
+  if (e.type === "rattrapage") return calcWorked(e.arrival, e.departure, e.brk);
+  const dow = new Date(e.date + "T12:00:00").getDay();
+  return (dow === 0 || dow === 6) ? 0 : hoursPerDay;
+};
+
+// Bonus hebdomadaire HS : 25 % pour H36–H43, 50 % au-delà (taux légaux français)
+// Non-cumul art. 6.14 CC IDCC 1513 : les heures dimanche/férié travaillées sont exclues
+// du calcul HS — leur majoration à 100 % s'applique à la place, pas en plus.
+const calcWeekOTBonus = (weekEntries, hoursPerDay, weeklyThreshold) => {
+  const rawTotal = weekEntries.reduce((acc, e) => {
+    if (e.isHoliday || e.isLeave) return acc + hoursPerDay; // congé/férié → compte dans le seuil
+    if (e.isMissing)              return acc;               // absent → 0h
+    if (e.type === "rattrapage")  return acc;               // repos pris → pas d'heures travaillées
+    if (isBonusDay(e.date))       return acc;               // dimanche/férié travaillé → exclu (non-cumul)
+    return acc + calcWorked(e.arrival, e.departure, e.brk);
+  }, 0);
+  const ot = Math.max(0, rawTotal - weeklyThreshold);
+  return Math.min(ot, 8) * 0.25 + Math.max(0, ot - 8) * 0.50;
+};
+
+const TYPE_LABELS = {
+  normal: "Normale", rattrapage: "Rattrapage", teletravail: "Télétravail",
+  deplacement: "Déplacement", ferie: "Jour Férié",
+  conge: "Congé payé", maladie: "Arrêt maladie", absent: "Non pointé",
+};
+const TYPE_BG = {
+  normal: "#1e3a5f", rattrapage: "#3d2600", teletravail: "#0c2d48",
+  deplacement: "#2d1a4a", ferie: "#14291a",
+  conge: "#1a2e1a", maladie: "#2d1a00", absent: "#2d1515",
+};
+const TYPE_FG = {
+  normal: "#7dd3fc", rattrapage: "#fbbf24", teletravail: "#38bdf8",
+  deplacement: "#c084fc", ferie: "#4ade80",
+  conge: "#86efac", maladie: "#fdba74", absent: "#fca5a5",
+};
+const DAY_FR  = ["Dim", "Lun", "Mar", "Mer", "Jeu", "Ven", "Sam"];
+
+/* ─────────────────────────────────────────────
+   DARK THEME TOKENS
+───────────────────────────────────────────── */
+const C = {
+  bg:           "#0b0f1a",
+  surface:      "#141926",
+  surfaceHigh:  "#1c2436",
+  border:       "#252f45",
+  borderLight:  "#1c2436",
+  text:         "#e2e8f0",
+  textSub:      "#94a3b8",
+  textFaint:    "#4a5568",
+  accent:       "#6366f1",
+  accentHover:  "#4f46e5",
+  accentGlow:   "rgba(99,102,241,0.25)",
+  green:        "#34d399",
+  greenDim:     "rgba(52,211,153,0.15)",
+  greenBorder:  "rgba(52,211,153,0.3)",
+  red:          "#f87171",
+  redDim:       "rgba(248,113,113,0.15)",
+  redBorder:    "rgba(248,113,113,0.3)",
+};
+
+/* ─────────────────────────────────────────────
+   CONSTANTS
+───────────────────────────────────────────── */
+const STORAGE_KEY = "pointage_v2";
+const defaultSettings = {
+  hoursPerDay: 7,
+  weeklyThreshold: 35,
+  contractStartDate: todayStr(),
+  arrivalRounding: "none",
+  departureRounding: "none",
+};
+
+/* ─────────────────────────────────────────────
+   SHARED STYLES
+───────────────────────────────────────────── */
+const IS = {
+  width: "100%", padding: "10px 12px", borderRadius: 10,
+  border: `1.5px solid ${C.border}`, fontSize: 14, fontFamily: "inherit",
+  background: C.bg, boxSizing: "border-box", marginTop: 4,
+  color: C.text, transition: "border-color 0.15s",
+  colorScheme: "dark",
+};
+const LS = {
+  fontSize: 11, color: C.textSub, fontWeight: 600,
+  letterSpacing: 0.5, textTransform: "uppercase",
+};
+const BS = {
+  padding: "13px 18px", borderRadius: 12, border: "none", cursor: "pointer",
+  fontFamily: "inherit", fontSize: 14, fontWeight: 700, color: "white",
+  background: `linear-gradient(135deg,${C.accent},#4338ca)`,
+  boxShadow: `0 4px 18px ${C.accentGlow}`,
+};
+
+/* ─────────────────────────────────────────────
+   SUB-COMPONENTS
+───────────────────────────────────────────── */
+function Collapsible({ title, open, onToggle, children }) {
+  return (
+    <div style={{ background: C.surface, borderRadius: 18, overflow: "hidden", border: `1px solid ${C.border}` }}>
+      <button onClick={onToggle} style={{
+        width: "100%", padding: "16px 20px", background: "none", border: "none",
+        cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center",
+        fontFamily: "inherit",
+      }}>
+        <span style={{ fontWeight: 700, fontSize: 15, color: C.text }}>{title}</span>
+        <span style={{
+          color: C.textSub, fontSize: 12, display: "inline-block",
+          transition: "transform 0.2s", transform: open ? "rotate(180deg)" : "none",
+        }}>▼</span>
+      </button>
+      {open && <div style={{ padding: "0 20px 20px" }}>{children}</div>}
+    </div>
+  );
+}
+
+function SCard({ title, children }) {
+  return (
+    <div style={{ background: C.surface, borderRadius: 18, padding: 20, border: `1px solid ${C.border}` }}>
+      <div style={{ fontWeight: 700, fontSize: 16, marginBottom: 16, color: C.text }}>{title}</div>
+      {children}
+    </div>
+  );
+}
+
+function Toggle({ value, onChange }) {
+  return (
+    <button onClick={() => onChange(!value)} style={{
+      width: 52, height: 30, borderRadius: 15, border: "none", cursor: "pointer", flexShrink: 0,
+      background: value ? C.accent : C.border, position: "relative", transition: "background 0.2s",
+    }}>
+      <div style={{
+        position: "absolute", top: 3, left: value ? 25 : 3, width: 24, height: 24,
+        borderRadius: "50%", background: "white", transition: "left 0.2s",
+        boxShadow: "0 1px 4px rgba(0,0,0,0.4)",
+      }} />
+    </button>
+  );
+}
+
+function RoundPicker({ label, value, onChange }) {
+  const opts = [
+    { v: "none",    l: "Pas d'arrondi" },
+    { v: "floor",   l: "Arrondi bas"   },
+    { v: "ceil",    l: "Arrondi haut"  },
+    { v: "nearest", l: "Plus proche"   },
+  ];
+  return (
+    <div style={{ marginBottom: 4 }}>
+      <div style={{ fontSize: 12, color: C.textSub, fontWeight: 600, marginBottom: 8 }}>{label}</div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {opts.map(o => (
+          <button key={o.v} onClick={() => onChange(o.v)} style={{
+            flex: 1, padding: "7px 4px", borderRadius: 9, border: `1px solid ${value === o.v ? C.accent : C.border}`,
+            cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600, transition: "all 0.15s",
+            background: value === o.v ? C.accent : C.surfaceHigh,
+            color: value === o.v ? "white" : C.textSub,
+            boxShadow: value === o.v ? `0 2px 10px ${C.accentGlow}` : "none",
+          }}>{o.l}</button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/* ─────────────────────────────────────────────
+   MAIN APP
+───────────────────────────────────────────── */
+function App() {
+  const [tab, setTab]           = useState(0);
+  const [entries, setEntries]   = useState([]);
+  const [paidOT, setPaidOT]     = useState([]);
+  const [leaves, setLeaves]     = useState([]);
+  const [sickLeaves, setSickLeaves] = useState([]);
+  const [session, setSession]   = useState(null);
+  const [settings, setSettings] = useState(defaultSettings);
+  const [tick, setTick]         = useState(0);
+
+  const [selectedWeeks, setSelectedWeeks] = useState(new Set());
+  const [expandedWeeks, setExpandedWeeks] = useState(new Set());
+
+  const [openManual, setOpenManual]   = useState(false);
+  const [openOT, setOpenOT]           = useState(false);
+  const [openLeaves, setOpenLeaves]   = useState(false);
+  const [openSick, setOpenSick]       = useState(false);
+
+  const [manualForm, setManualForm]   = useState({ date: todayStr(), arrival: "", departure: "", brk: 0, type: "normal", note: "" });
+  const [sessionOpts, setSessionOpts] = useState({ brk: 0, type: "normal", note: "" });
+  const [otForm, setOtForm]           = useState({ date: todayStr(), hours: "", desc: "" });
+  const [leavesForm, setLeavesForm]   = useState({ start: todayStr(), end: todayStr(), days: 1, desc: "" });
+  const [sickForm, setSickForm]       = useState({ start: todayStr(), end: todayStr(), desc: "" });
+
+  const importRef = useRef();
+
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const d = JSON.parse(raw);
+        if (d.entries)     setEntries(d.entries);
+        if (d.paidOT)      setPaidOT(d.paidOT);
+        if (d.leaves)      setLeaves(d.leaves);
+        if (d.sickLeaves)  setSickLeaves(d.sickLeaves);
+        if (d.session)     setSession(d.session);
+        if (d.settings)    setSettings({ ...defaultSettings, ...d.settings });
+      }
+    } catch (_) {}
+  }, []);
+
+  const persist = (e, po, lv, sl, se, st) => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ entries: e, paidOT: po, leaves: lv, sickLeaves: sl, session: se, settings: st })); } catch(_) {}
+  };
+
+  const commit = (ne, npo, nlv, nsl, nse, nst) => {
+    const e  = ne  !== undefined ? ne  : entries;
+    const po = npo !== undefined ? npo : paidOT;
+    const lv = nlv !== undefined ? nlv : leaves;
+    const sl = nsl !== undefined ? nsl : sickLeaves;
+    const se = nse !== undefined ? nse : session;
+    const st = nst !== undefined ? nst : settings;
+    setEntries(e); setPaidOT(po); setLeaves(lv); setSickLeaves(sl); setSession(se); setSettings(st);
+    persist(e, po, lv, sl, se, st);
+  };
+
+  const holidayEntries = buildHolidayEntries(entries, settings);
+  const leaveEntries   = buildLeaveVirtualEntries(entries, leaves, sickLeaves, holidayEntries);
+  const missingEntries = buildMissingDayEntries(entries, holidayEntries, leaveEntries, settings);
+  const allVirtual     = [...holidayEntries, ...leaveEntries, ...missingEntries];
+
+  // Construction des semaines en premier (nécessaire pour le bonus HS hebdomadaire)
+  const weeks = {};
+  [...entries, ...allVirtual].forEach(e => {
+    const ws = getWeekStart(e.date);
+    if (!weeks[ws]) weeks[ws] = [];
+    weeks[ws].push(e);
+  });
+
+  const balance =
+    [...entries, ...allVirtual].reduce((acc, e) => acc + calcWorkedE(e, settings.hoursPerDay) - expectedHours(e, settings.hoursPerDay), 0)
+    + Object.values(weeks).reduce((acc, we) => acc + calcWeekOTBonus(we, settings.hoursPerDay, settings.weeklyThreshold), 0)
+    - paidOT.reduce((acc, o) => acc + Number(o.hours), 0);
+
+  const sessionDuration = () => {
+    if (!session) return null;
+    const [sh, sm] = session.time.split(":").map(Number);
+    const now = new Date(), start = new Date();
+    start.setHours(sh, sm, 0, 0);
+    const diff = Math.floor((now - start) / 1000);
+    if (diff < 0) return "0h00";
+    return `${Math.floor(diff / 3600)}h${pad(Math.floor((diff % 3600) / 60))}`;
+  };
+
+  const handleArrivee = () => {
+    const t = applyRound(nowTime(), settings.arrivalRounding);
+    commit(undefined, undefined, undefined, undefined, { time: t, date: todayStr() }, undefined);
+  };
+
+  const handleDepart = () => {
+    if (!session) return;
+    const t = applyRound(nowTime(), settings.departureRounding);
+    const entry = {
+      id: uid(), date: session.date, arrival: session.time, departure: t,
+      brk: Number(sessionOpts.brk), type: sessionOpts.type, note: sessionOpts.note,
+    };
+    commit([...entries, entry], undefined, undefined, undefined, null, undefined);
+    setSessionOpts({ brk: 0, type: "normal", note: "" });
+  };
+
+  const addManualEntry = () => {
+    if (!manualForm.arrival || !manualForm.departure) return;
+    commit([...entries, { ...manualForm, id: uid(), brk: Number(manualForm.brk) }], undefined, undefined, undefined, undefined, undefined);
+    setManualForm({ date: todayStr(), arrival: "", departure: "", brk: 0, type: "normal", note: "" });
+  };
+
+  const addOT = () => {
+    if (!otForm.hours) return;
+    commit(undefined, [...paidOT, { ...otForm, id: uid(), hours: Number(otForm.hours) }], undefined, undefined, undefined, undefined);
+    setOtForm({ date: todayStr(), hours: "", desc: "" });
+  };
+
+  const addLeave = () => {
+    commit(undefined, undefined, [...leaves, { ...leavesForm, id: uid() }], undefined, undefined, undefined);
+    setLeavesForm({ start: todayStr(), end: todayStr(), days: 1, desc: "" });
+  };
+
+  const addSick = () => {
+    commit(undefined, undefined, undefined, [...sickLeaves, { ...sickForm, id: uid() }], undefined, undefined);
+    setSickForm({ start: todayStr(), end: todayStr(), desc: "" });
+  };
+
+  const sortedWeeks = Object.keys(weeks).sort((a, b) => b.localeCompare(a));
+  const weekBalance = ws => {
+    const we = weeks[ws];
+    return we.reduce((acc, e) => acc + calcWorkedE(e, settings.hoursPerDay) - expectedHours(e, settings.hoursPerDay), 0)
+      + calcWeekOTBonus(we, settings.hoursPerDay, settings.weeklyThreshold);
+  };
+
+  /* ── PDF Export ── */
+  const exportPDF = () => {
+    [...selectedWeeks].sort().forEach(ws => {
+      const wEntries = (weeks[ws] || []).slice().sort((a, b) => a.date.localeCompare(b.date));
+      const wNum = getWeekNum(ws), year = ws.slice(0, 4), bal = weekBalance(ws);
+      const otBonus     = calcWeekOTBonus(wEntries, settings.hoursPerDay, settings.weeklyThreshold);
+      const totalWorked = wEntries.reduce((acc, e) => acc + calcWorkedE(e, settings.hoursPerDay), 0);
+      const totalExpected = wEntries.reduce((acc, e) => acc + expectedHours(e, settings.hoursPerDay), 0);
+      const rawRegular  = wEntries.reduce((acc, e) => {
+        if (e.isHoliday || e.isLeave) return acc + settings.hoursPerDay;
+        if (e.isMissing || e.type === "rattrapage" || isBonusDay(e.date)) return acc;
+        return acc + calcWorked(e.arrival, e.departure, e.brk);
+      }, 0);
+
+      /* ── Lignes du tableau ── */
+      const rows = wEntries.map(e => {
+        const worked = calcWorkedE(e, settings.hoursPerDay);
+        const raw    = calcWorked(e.arrival || "00:00", e.departure || "00:00", e.brk || 0);
+        const diff   = worked - expectedHours(e, settings.hoursPerDay);
+        const dayStr = DAY_FR[new Date(e.date + "T12:00:00").getDay()];
+        const isBonus = !e.isHoliday && !e.isLeave && !e.isMissing && e.type !== "rattrapage" && isBonusDay(e.date);
+        const x2badge = isBonus ? `<span class="x2">×2</span>` : "";
+        let rowClass = "", timeCols = "", workedTd = "", noteTd = "";
+        if (e.isHoliday) {
+          rowClass = "holiday-row";
+          timeCols = `<td colspan="3" style="color:#166534;font-style:italic">🇫🇷 ${e.name}</td>`;
+          workedTd = `<td class="mono">${fmtWorked(worked)}</td>`;
+          noteTd   = `<td class="note-cell">—</td>`;
+        } else if (e.isLeave) {
+          const em = e.leaveType === "maladie" ? "🏥" : "🏖️";
+          rowClass = e.leaveType === "maladie" ? "maladie-row" : "conge-row";
+          timeCols = `<td colspan="3" style="font-style:italic;color:#64748b">${em} Absence justifiée</td>`;
+          workedTd = `<td class="mono">${fmtWorked(worked)}</td>`;
+          noteTd   = `<td class="note-cell">—</td>`;
+        } else if (e.isMissing) {
+          rowClass = "missing-row";
+          timeCols = `<td colspan="3" style="color:#dc2626;font-style:italic">⚠️ Aucun pointage enregistré</td>`;
+          workedTd = `<td class="mono" style="color:#94a3b8">—</td>`;
+          noteTd   = `<td class="note-cell">—</td>`;
+        } else if (e.type === "rattrapage") {
+          rowClass = "rattrapage-row";
+          timeCols = `<td>${e.arrival}</td><td>${e.departure}</td><td>0 min</td>`;
+          workedTd = `<td class="mono" style="color:#94a3b8">—</td>`;
+          noteTd   = `<td class="note-cell">🛌 ${fmtWorked(raw)} de repos pris en compensation</td>`;
+        } else {
+          rowClass = isBonus ? "sunday-row" : "";
+          timeCols = `<td>${e.arrival}</td><td>${e.departure}</td><td>${e.brk || 0} min</td>`;
+          workedTd = isBonus
+            ? `<td class="mono">${fmtWorked(raw)} × 2 = <strong>${fmtWorked(worked)}</strong></td>`
+            : `<td class="mono">${fmtWorked(worked)}</td>`;
+          noteTd   = `<td class="note-cell">${e.note || "—"}</td>`;
+        }
+        return `<tr class="${rowClass}">
+          <td>${dayStr} ${fmtDate(e.date)} ${x2badge}</td>
+          ${timeCols}
+          ${workedTd}
+          <td class="mono ${diff >= 0 ? "pos" : "neg"}">${fmtHours(diff)}</td>
+          <td><span class="badge badge-${e.type}">${TYPE_LABELS[e.type]}</span></td>
+          ${noteTd}
+        </tr>`;
+      }).join("");
+
+      /* ── Bloc HS ── */
+      const ot = Math.max(0, rawRegular - settings.weeklyThreshold);
+      const otBlock = `<div class="block ${otBonus > 0 ? "block-ot" : "block-neutral"}">
+  <div class="block-title">📈 Heures supplémentaires — art. 6.14 CC IDCC 1513</div>
+  <p>Brut régulier (hors rattrapage, dimanche et fériés travaillés) :
+    <span class="ot-code">${fmtWorked(rawRegular)} ${otBonus > 0 ? `&gt; seuil ${settings.weeklyThreshold}h/sem` : `≤ seuil ${settings.weeklyThreshold}h/sem`}</span>
+    ${otBonus > 0
+      ? `— Dépassement <strong>${fmtWorked(ot)}</strong> :
+         <span class="ot-code">${ot <= 8 ? `× 25 %` : `8h × 25 % + ${fmtWorked(ot - 8)} × 50 %`} = ${fmtHours(otBonus)}</span>
+         — Dimanche/Férié travaillé : majoration ×2 uniquement (non-cumul art. 6.14)`
+      : `— Aucune majoration HS cette semaine.`
+    }
+  </p>
+</div>`;
+
+      /* ── Bloc heures attendues ── */
+      const expItems = wEntries.map(e => {
+        const exp = expectedHours(e, settings.hoursPerDay);
+        const d   = DAY_FR[new Date(e.date + "T12:00:00").getDay()];
+        const sfx = e.isHoliday ? " 🇫🇷" : e.isLeave ? (e.leaveType === "maladie" ? " 🏥" : " 🏖️") : e.isMissing ? " ⚠️" : e.type === "rattrapage" ? " 🛌" : new Date(e.date + "T12:00:00").getDay() === 0 ? " (dim.)" : "";
+        return `${d}${sfx} <strong>${fmtWorked(exp)}</strong>`;
+      }).join(" + ");
+
+      /* ── Grille récapitulatif ── */
+      const detailItems = wEntries.map(e => {
+        const diff = calcWorkedE(e, settings.hoursPerDay) - expectedHours(e, settings.hoursPerDay);
+        const d    = DAY_FR[new Date(e.date + "T12:00:00").getDay()];
+        const sfx  = e.isHoliday ? " (Férié)" : e.isLeave ? (e.leaveType === "maladie" ? " (Maladie)" : " (Congé)") : e.isMissing ? " (Absent)" : e.type === "rattrapage" ? " (Rattrap.)" : new Date(e.date + "T12:00:00").getDay() === 0 ? " ×2" : "";
+        return `<div class="d-item"><span class="day">${d}${sfx}</span><span class="ecart ${diff >= 0 ? "pos" : "neg"}">${fmtHours(diff)}</span></div>`;
+      }).join("") + (otBonus > 0 ? `<div class="d-item d-item-ot"><span class="day">Bonus HS (${ot <= 8 ? "25 %" : "25 %/50 %"})</span><span class="ecart" style="color:#ea580c">${fmtHours(otBonus)}</span></div>` : "");
+
+      const html = `<!DOCTYPE html><html lang="fr">
+<head><meta charset="utf-8"><meta name="viewport" content="width=1122">
+<title>Semaine ${wNum} · ${year}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Segoe UI',system-ui,sans-serif;color:#1e293b;background:#fff;font-size:13px;width:1122px;padding:28px 36px}
+header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:22px;padding-bottom:16px;border-bottom:2px solid #e2e8f0}
+.logo{font-size:20px;font-weight:700;color:#4338ca}.logo span{color:#94a3b8;font-weight:400;font-size:12px;display:block;margin-top:2px}
+.week-info{text-align:right}.week-info h1{font-size:17px;font-weight:700}.week-info p{font-size:12px;color:#64748b;margin-top:3px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+thead tr{background:#4338ca;color:white}
+th{padding:9px 12px;text-align:left;font-weight:600;font-size:10.5px;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap}
+td{padding:9px 12px;border-bottom:1px solid #f1f5f9;vertical-align:middle;white-space:nowrap}
+tr:nth-child(even) td{background:#f8fafc}
+tr.holiday-row td{background:#f0fdf4}tr.rattrapage-row td{background:#fffbeb}
+tr.maladie-row td{background:#fff7ed}tr.conge-row td{background:#f0fdf4}
+tr.missing-row td{background:#fef2f2}tr.sunday-row td{background:#fef9ee}
+.note-cell{white-space:normal;font-style:italic;color:#64748b;font-size:12px}
+.mono{font-family:'Courier New',monospace}
+.pos{color:#059669;font-weight:700}.neg{color:#dc2626;font-weight:700}
+.badge{display:inline-block;padding:2px 8px;border-radius:20px;font-size:10.5px;font-weight:600}
+.badge-normal{background:#f1f5f9;color:#475569}.badge-rattrapage{background:#fef3c7;color:#92400e}
+.badge-teletravail{background:#dbeafe;color:#1d4ed8}.badge-deplacement{background:#f3e8ff;color:#6b21a8}
+.badge-ferie{background:#dcfce7;color:#166534}.badge-conge{background:#dcfce7;color:#166534}
+.badge-maladie{background:#ffedd5;color:#9a3412}.badge-absent{background:#fef2f2;color:#991b1b}
+.x2{display:inline-block;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:700;background:#422006;color:#fb923c;margin-left:4px}
+.block{width:100%;margin-top:12px;border-radius:10px;padding:16px 20px}
+.block-title{font-size:13px;font-weight:700;margin-bottom:10px}
+.block-ot{border:1.5px solid #fed7aa;background:#fff8f1}.block-ot .block-title{color:#7c2d12}.block-ot p{font-size:12.5px;color:#92400e;line-height:1.8}
+.block-neutral{border:1px solid #e2e8f0;background:#f8fafc}.block-neutral .block-title{color:#64748b}.block-neutral p{font-size:12.5px;color:#94a3b8;line-height:1.8}
+.ot-code{font-family:'Courier New',monospace;font-size:12px;background:rgba(251,191,36,.15);display:inline-block;padding:1px 7px;border-radius:4px;margin:2px 0}
+.block-expected{border:1px solid #bae6fd;background:#f0f9ff}.block-expected .block-title{color:#0c4a6e}.block-expected p{font-size:12.5px;color:#0369a1;line-height:1.9}
+.block-detail{border:1px solid #e2e8f0;background:#f8fafc}.block-detail .block-title{color:#1e293b}
+.detail-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px;margin-bottom:12px}
+.d-item{background:white;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;display:flex;flex-direction:column;align-items:center;gap:3px}
+.d-item .day{font-size:11px;color:#64748b;font-weight:500;text-align:center}
+.d-item .ecart{font-family:'Courier New',monospace;font-size:14px;font-weight:700}
+.d-item-ot{background:#fff8f1;border-color:#fed7aa;grid-column:span 6;flex-direction:row;justify-content:space-between;padding:8px 14px}
+.d-item-ot .day{font-size:12px;color:#92400e;font-weight:600}.d-item-ot .ecart{font-size:14px;color:#ea580c}
+.detail-total{padding-top:12px;border-top:1.5px solid #e2e8f0;display:flex;justify-content:space-between;align-items:center}
+.detail-total .formula{font-size:11px;color:#64748b}
+.detail-total .result{font-family:'Courier New',monospace;font-size:22px;font-weight:700}
+.summary-wrap{margin-top:12px;display:flex;gap:12px;align-items:stretch}
+.cards-left{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;flex:1}
+.sc{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:14px 16px}
+.sc .lbl{font-size:9.5px;color:#94a3b8;text-transform:uppercase;letter-spacing:.7px;margin-bottom:6px}
+.sc .val{font-size:20px;font-family:'Courier New',monospace;font-weight:700;color:#1e293b}
+.sc .val.pos{color:#059669}.sc .val.neg{color:#dc2626}.sc .val.ot{color:#ea580c}
+.sc .sub{font-size:10.5px;color:#94a3b8;margin-top:3px}
+.cumul-card{background:linear-gradient(150deg,#4338ca,#312e81);border-radius:10px;padding:18px 22px;flex:0 0 185px;display:flex;flex-direction:column;justify-content:center;color:white;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+.cumul-card .lbl{font-size:9.5px;text-transform:uppercase;letter-spacing:.8px;opacity:.75;margin-bottom:10px}
+.cumul-card .breakdown{font-size:11px;opacity:.85;line-height:2.1;font-family:'Courier New',monospace;margin-bottom:12px;border-bottom:1px solid rgba(255,255,255,.25);padding-bottom:12px}
+.cumul-card .val{font-size:28px;font-family:'Courier New',monospace;font-weight:700;color:#a5f3fc;letter-spacing:-1px;line-height:1}
+.cumul-card .val-label{font-size:10px;opacity:.65;margin-top:5px}
+footer{margin-top:16px;padding-top:12px;border-top:1px solid #e2e8f0;font-size:10.5px;color:#94a3b8;display:flex;justify-content:space-between}
+@media print{
+  @page{size:A4 landscape;margin:1cm}
+  body{width:auto;padding:0}
+  tr.holiday-row td,tr.rattrapage-row td,tr.maladie-row td,tr.conge-row td,tr.missing-row td,tr.sunday-row td,tr:nth-child(even) td{background:transparent!important}
+  .cumul-card{-webkit-print-color-adjust:exact;print-color-adjust:exact}
+}
+</style></head><body>
+<header>
+  <div class="logo">⏱ Pointage<span>Rapport de présence</span></div>
+  <div class="week-info">
+    <h1>Semaine ${wNum} — ${year}</h1>
+    <p>Du ${fmtDate(ws)} · ${wEntries.filter(e => !e.isMissing).length} entrée${wEntries.filter(e => !e.isMissing).length > 1 ? "s" : ""} · ${wEntries.filter(e => e.isHoliday).length > 0 ? `${wEntries.filter(e => e.isHoliday).length} férié${wEntries.filter(e => e.isHoliday).length > 1 ? "s" : ""} auto.` : "aucun férié"}</p>
+  </div>
+</header>
+<table>
+  <thead><tr><th>Date</th><th>Arrivée</th><th>Départ</th><th>Pause</th><th>Travaillé</th><th>Écart</th><th>Type</th><th>Note</th></tr></thead>
+  <tbody>${rows}</tbody>
+</table>
+${otBlock}
+<div class="block block-expected">
+  <div class="block-title">🗓 Détail des heures attendues</div>
+  <p>${expItems} = <strong>${fmtWorked(totalExpected)}</strong></p>
+</div>
+<div class="block block-detail">
+  <div class="block-title">📊 Récapitulatif du solde semaine</div>
+  <div class="detail-grid">${detailItems}</div>
+  <div class="detail-total">
+    <span class="formula">Effectif ${fmtWorked(totalWorked)} − Attendu ${fmtWorked(totalExpected)}${otBonus > 0 ? ` + Bonus HS ${fmtHours(otBonus)}` : ""}</span>
+    <span class="result ${bal >= 0 ? "pos" : "neg"}">${fmtHours(bal)}</span>
+  </div>
+</div>
+<div class="summary-wrap">
+  <div class="cards-left">
+    <div class="sc"><div class="lbl">Total effectif</div><div class="val">${fmtWorked(totalWorked)}</div><div class="sub">heures avec majorations</div></div>
+    <div class="sc"><div class="lbl">Heures attendues</div><div class="val">${fmtWorked(totalExpected)}</div><div class="sub">contrat + rattrapage</div></div>
+    <div class="sc"><div class="lbl">Bonus HS</div><div class="val ${otBonus > 0 ? "ot" : ""}">${otBonus > 0 ? fmtHours(otBonus) : "—"}</div><div class="sub">${otBonus > 0 ? `${fmtWorked(ot)} de dépassement` : "seuil non atteint"}</div></div>
+    <div class="sc"><div class="lbl">Solde semaine</div><div class="val ${bal >= 0 ? "pos" : "neg"}">${fmtHours(bal)}</div><div class="sub">effectif − attendu + bonus</div></div>
+  </div>
+  <div class="cumul-card">
+    <div class="lbl">Solde total cumulé</div>
+    <div class="breakdown">Sem. précédentes &nbsp;${fmtHours(balance - bal)}<br>Sem. ${wNum} (cette sem.) ${fmtHours(bal)}</div>
+    <div class="val">${fmtHours(balance)}</div>
+    <div class="val-label">depuis le début du contrat</div>
+  </div>
+</div>
+<footer>
+  <span>Généré le ${new Date().toLocaleDateString("fr-FR",{weekday:"long",day:"numeric",month:"long",year:"numeric"})}</span>
+  <span>Contrat : ${settings.hoursPerDay}h/jour — Seuil HS : ${settings.weeklyThreshold}h/semaine — CC IDCC 1513</span>
+</footer>
+</body></html>`;
+      const w = window.open("", "_blank");
+      if (w) { w.document.write(html); w.document.close(); setTimeout(() => { w.focus(); w.print(); }, 600); }
+    });
+  };
+
+  const exportJSON = () => {
+    const blob = new Blob([JSON.stringify({ entries, paidOT, leaves, sickLeaves, settings }, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `pointage-${todayStr()}.json`; a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImport = e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const d = JSON.parse(ev.target.result);
+        commit(d.entries || [], d.paidOT || [], d.leaves || [], d.sickLeaves || [], null, { ...defaultSettings, ...(d.settings || {}) });
+      } catch { alert("Fichier JSON invalide."); }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const balPos = balance >= 0;
+
+  return (
+    <div style={{ fontFamily: "'Outfit','Segoe UI',sans-serif", background: C.bg, minHeight: "100vh", color: C.text }}>
+      <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+      {/* ── Header ── */}
+      <div style={{ background: C.surface, borderBottom: `1px solid ${C.border}`, position: "sticky", top: 0, zIndex: 50 }}>
+        <div style={{ maxWidth: 620, margin: "0 auto", padding: "14px 16px 0" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}>
+            <span style={{ fontSize: 20 }}>⏱</span>
+            <span style={{ color: C.text, fontWeight: 700, fontSize: 18, letterSpacing: "-0.3px" }}>Pointage</span>
+            <div style={{ marginLeft: "auto" }}>
+              <div style={{
+                background: balPos ? C.greenDim : C.redDim,
+                border: `1px solid ${balPos ? C.greenBorder : C.redBorder}`,
+                borderRadius: 999, padding: "5px 14px",
+                fontFamily: "'DM Mono',monospace", fontSize: 15, fontWeight: 500,
+                color: balPos ? C.green : C.red,
+              }}>
+                {fmtHours(balance)}
+              </div>
+            </div>
+          </div>
+          <div style={{ display: "flex", borderBottom: `1px solid ${C.border}` }}>
+            {["Pointage", "Historique", "Paramètres"].map((label, i) => (
+              <button key={i} onClick={() => setTab(i)} style={{
+                flex: 1, padding: "10px 0", background: "none", border: "none", cursor: "pointer",
+                color: tab === i ? C.text : C.textSub,
+                fontWeight: tab === i ? 700 : 400, fontSize: 14, fontFamily: "inherit",
+                borderBottom: tab === i ? `3px solid ${C.accent}` : "3px solid transparent",
+                transition: "color 0.15s",
+              }}>{label}</button>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 620, margin: "0 auto", padding: "16px 16px 80px" }}>
+
+        {/* ══════════════════════════════
+            TAB 0 — POINTAGE
+        ══════════════════════════════ */}
+        {tab === 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+            {/* Balance */}
+            <div style={{
+              background: balPos
+                ? "linear-gradient(135deg,#064e3b,#065f46)"
+                : "linear-gradient(135deg,#7f1d1d,#991b1b)",
+              borderRadius: 18, padding: "22px 24px", color: "white",
+              border: `1px solid ${balPos ? C.greenBorder : C.redBorder}`,
+              boxShadow: balPos ? `0 8px 32px rgba(52,211,153,0.15)` : `0 8px 32px rgba(248,113,113,0.15)`,
+            }}>
+              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 1, opacity: .7, marginBottom: 6 }}>Solde total</div>
+              <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 44, fontWeight: 500, lineHeight: 1, letterSpacing: -1, color: balPos ? C.green : C.red }}>
+                {fmtHours(balance)}
+              </div>
+              <div style={{ fontSize: 12, opacity: .6, marginTop: 8 }}>
+                {entries.length} enregistrement{entries.length !== 1 ? "s" : ""} · contrat {settings.hoursPerDay}h/jour
+              </div>
+            </div>
+
+            {/* Session */}
+            <div style={{ background: C.surface, borderRadius: 18, padding: 20, border: `1px solid ${C.border}` }}>
+              {session ? (
+                <>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 18 }}>
+                    <div>
+                      <div style={{ fontSize: 11, color: C.textSub, textTransform: "uppercase", letterSpacing: .8 }}>Session en cours</div>
+                      <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 40, fontWeight: 500, color: C.accent, letterSpacing: -1, lineHeight: 1.1 }}>
+                        {sessionDuration()}
+                      </div>
+                      <div style={{ fontSize: 13, color: C.textSub, marginTop: 4 }}>
+                        Arrivée à {session.time} · {fmtDate(session.date)}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(52,211,153,0.1)", borderRadius: 999, padding: "6px 12px", border: "1px solid rgba(52,211,153,0.2)" }}>
+                      <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.green }} />
+                      <span style={{ fontSize: 12, color: C.green, fontWeight: 600 }}>Actif</span>
+                    </div>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+                    <div>
+                      <label style={LS}>Pause (min)</label>
+                      <input type="number" min="0" value={sessionOpts.brk}
+                        onChange={e => setSessionOpts(s => ({ ...s, brk: e.target.value }))} style={IS} />
+                    </div>
+                    <div>
+                      <label style={LS}>Type de journée</label>
+                      <select value={sessionOpts.type}
+                        onChange={e => setSessionOpts(s => ({ ...s, type: e.target.value }))} style={IS}>
+                        {Object.entries(TYPE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                      </select>
+                    </div>
+                    <div style={{ gridColumn: "1/-1" }}>
+                      <label style={LS}>Note</label>
+                      <input type="text" placeholder="Optionnel" value={sessionOpts.note}
+                        onChange={e => setSessionOpts(s => ({ ...s, note: e.target.value }))} style={IS} />
+                    </div>
+                  </div>
+                  <button onClick={handleDepart} style={{
+                    ...BS, width: "100%",
+                    background: "linear-gradient(135deg,#991b1b,#7f1d1d)",
+                    boxShadow: "0 4px 18px rgba(248,113,113,0.2)",
+                  }}>Enregistrer le départ</button>
+                </>
+              ) : (
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontSize: 38, marginBottom: 8 }}>👋</div>
+                  <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 4, color: C.text }}>Bonne journée !</div>
+                  <div style={{ fontSize: 13, color: C.textSub, marginBottom: 20 }}>Aucune session en cours</div>
+                  <button onClick={handleArrivee} style={{
+                    ...BS, width: "100%",
+                    background: "linear-gradient(135deg,#065f46,#064e3b)",
+                    boxShadow: "0 4px 18px rgba(52,211,153,0.2)",
+                  }}>
+                    Pointer l'arrivée · {nowTime()}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {/* Saisies manuelles */}
+            <Collapsible title="✏️  Saisies manuelles" open={openManual} onToggle={() => setOpenManual(v => !v)}>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div style={{ gridColumn: "1/-1" }}>
+                  <label style={LS}>Date</label>
+                  <input type="date" value={manualForm.date}
+                    onChange={e => setManualForm(s => ({ ...s, date: e.target.value }))} style={IS} />
+                </div>
+                <div>
+                  <label style={LS}>Arrivée</label>
+                  <input type="time" value={manualForm.arrival}
+                    onChange={e => setManualForm(s => ({ ...s, arrival: e.target.value }))} style={IS} />
+                </div>
+                <div>
+                  <label style={LS}>Départ</label>
+                  <input type="time" value={manualForm.departure}
+                    onChange={e => setManualForm(s => ({ ...s, departure: e.target.value }))} style={IS} />
+                </div>
+                <div>
+                  <label style={LS}>Pause (min)</label>
+                  <input type="number" min="0" value={manualForm.brk}
+                    onChange={e => setManualForm(s => ({ ...s, brk: e.target.value }))} style={IS} />
+                </div>
+                <div>
+                  <label style={LS}>Type</label>
+                  <select value={manualForm.type}
+                    onChange={e => setManualForm(s => ({ ...s, type: e.target.value }))} style={IS}>
+                    {Object.entries(TYPE_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                </div>
+                <div style={{ gridColumn: "1/-1" }}>
+                  <label style={LS}>Note</label>
+                  <input type="text" placeholder="Optionnel" value={manualForm.note}
+                    onChange={e => setManualForm(s => ({ ...s, note: e.target.value }))} style={IS} />
+                </div>
+              </div>
+              <button onClick={addManualEntry} style={{ ...BS, width: "100%", marginTop: 14 }}>Ajouter la journée</button>
+              {entries.length > 0 && (
+                <div style={{ marginTop: 16 }}>
+                  <div style={{ fontSize: 11, color: C.textSub, textTransform: "uppercase", letterSpacing: .8, marginBottom: 8 }}>Dernières saisies</div>
+                  {[...entries].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5).map(e => {
+                    const raw    = calcWorked(e.arrival, e.departure, e.brk);
+                    const worked = calcWorkedE(e, settings.hoursPerDay);
+                    const diff   = worked - expectedHours(e, settings.hoursPerDay);
+                    const bonus  = isBonusDay(e.date) && e.type !== "rattrapage";
+                    return (
+                      <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: C.surfaceHigh, borderRadius: 10, padding: "10px 14px", marginBottom: 6, border: `1px solid ${C.borderLight}` }}>
+                        <div>
+                          <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 2 }}>
+                            <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{fmtDate(e.date)}</span>
+                            {bonus && <span style={{ fontSize: 10, background: "#422006", color: "#fb923c", borderRadius: 5, padding: "1px 5px", fontWeight: 700 }}>×2</span>}
+                          </div>
+                          <div style={{ fontSize: 12, color: C.textSub }}>
+                            {e.arrival} → {e.departure}{e.brk > 0 ? ` · ${e.brk}min` : ""}
+                            {" "}<span style={{ background: TYPE_BG[e.type], color: TYPE_FG[e.type], borderRadius: 999, padding: "1px 7px", fontSize: 11, fontWeight: 600 }}>{TYPE_LABELS[e.type]}</span>
+                          </div>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                          <div style={{ textAlign: "right" }}>
+                            <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 13, fontWeight: 500, color: diff >= 0 ? C.green : C.red }}>{fmtHours(diff)}</span>
+                            {bonus && <div style={{ fontSize: 10, color: C.textFaint }}>{fmtWorked(raw)} × 2</div>}
+                          </div>
+                          <button onClick={() => commit(entries.filter(x => x.id !== e.id), undefined, undefined, undefined, undefined, undefined)}
+                            style={{ background: "none", border: "none", color: C.textFaint, cursor: "pointer", fontSize: 20, lineHeight: 1 }}>×</button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {entries.length > 5 && (
+                    <button onClick={() => setTab(1)}
+                      style={{ width: "100%", background: "none", border: `1px dashed ${C.border}`, borderRadius: 10, padding: 9, fontSize: 12, color: C.textSub, cursor: "pointer", fontFamily: "inherit" }}>
+                      +{entries.length - 5} autres → voir l'Historique
+                    </button>
+                  )}
+                </div>
+              )}
+            </Collapsible>
+
+            {/* Heures supp payées */}
+            <Collapsible title="💶  Heures supplémentaires payées" open={openOT} onToggle={() => setOpenOT(v => !v)}>
+              <div style={{ fontSize: 12, color: C.textSub, background: C.surfaceHigh, borderRadius: 8, padding: "8px 12px", marginBottom: 12, border: `1px solid ${C.border}` }}>
+                Les heures supplémentaires payées sont déduites du solde d'heures.
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div>
+                  <label style={LS}>Date</label>
+                  <input type="date" value={otForm.date}
+                    onChange={e => setOtForm(s => ({ ...s, date: e.target.value }))} style={IS} />
+                </div>
+                <div>
+                  <label style={LS}>Heures</label>
+                  <input type="number" step="0.5" min="0" placeholder="ex: 2.5" value={otForm.hours}
+                    onChange={e => setOtForm(s => ({ ...s, hours: e.target.value }))} style={IS} />
+                </div>
+                <div style={{ gridColumn: "1/-1" }}>
+                  <label style={LS}>Description</label>
+                  <input type="text" placeholder="Optionnel" value={otForm.desc}
+                    onChange={e => setOtForm(s => ({ ...s, desc: e.target.value }))} style={IS} />
+                </div>
+              </div>
+              <button onClick={addOT} style={{ ...BS, width: "100%", marginTop: 14 }}>Ajouter</button>
+              {paidOT.length > 0 && (
+                <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
+                  {paidOT.map(o => (
+                    <div key={o.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: C.surfaceHigh, borderRadius: 10, padding: "10px 14px", border: `1px solid ${C.borderLight}` }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{fmtDate(o.date)} · {o.hours}h</div>
+                        {o.desc && <div style={{ fontSize: 12, color: C.textSub }}>{o.desc}</div>}
+                      </div>
+                      <button onClick={() => commit(undefined, paidOT.filter(x => x.id !== o.id), undefined, undefined, undefined, undefined)}
+                        style={{ background: "none", border: "none", color: C.textFaint, cursor: "pointer", fontSize: 20 }}>×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Collapsible>
+
+            {/* Congés */}
+            <Collapsible title="🏖️  Congés payés" open={openLeaves} onToggle={() => setOpenLeaves(v => !v)}>
+              <div style={{ fontSize: 12, color: C.green, background: "rgba(52,211,153,0.08)", borderRadius: 8, padding: "8px 12px", marginBottom: 12, border: "1px solid rgba(52,211,153,0.2)" }}>
+                ✓ Les congés payés sont comptés comme des jours normaux dans le solde.
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div>
+                  <label style={LS}>Début</label>
+                  <input type="date" value={leavesForm.start}
+                    onChange={e => setLeavesForm(s => ({ ...s, start: e.target.value }))} style={IS} />
+                </div>
+                <div>
+                  <label style={LS}>Fin</label>
+                  <input type="date" value={leavesForm.end}
+                    onChange={e => setLeavesForm(s => ({ ...s, end: e.target.value }))} style={IS} />
+                </div>
+                <div>
+                  <label style={LS}>Nb jours</label>
+                  <input type="number" min="0.5" step="0.5" value={leavesForm.days}
+                    onChange={e => setLeavesForm(s => ({ ...s, days: e.target.value }))} style={IS} />
+                </div>
+                <div>
+                  <label style={LS}>Description</label>
+                  <input type="text" placeholder="Optionnel" value={leavesForm.desc}
+                    onChange={e => setLeavesForm(s => ({ ...s, desc: e.target.value }))} style={IS} />
+                </div>
+              </div>
+              <button onClick={addLeave} style={{ ...BS, width: "100%", marginTop: 14 }}>Ajouter</button>
+              {leaves.length > 0 && (
+                <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
+                  {leaves.map(l => (
+                    <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: C.surfaceHigh, borderRadius: 10, padding: "10px 14px", border: `1px solid ${C.borderLight}` }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{fmtDate(l.start)} → {fmtDate(l.end)} · {l.days}j</div>
+                        {l.desc && <div style={{ fontSize: 12, color: C.textSub }}>{l.desc}</div>}
+                      </div>
+                      <button onClick={() => commit(undefined, undefined, leaves.filter(x => x.id !== l.id), undefined, undefined, undefined)}
+                        style={{ background: "none", border: "none", color: C.textFaint, cursor: "pointer", fontSize: 20 }}>×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Collapsible>
+
+            {/* Arrêts maladie */}
+            <Collapsible title="🏥  Arrêts maladie" open={openSick} onToggle={() => setOpenSick(v => !v)}>
+              <div style={{ fontSize: 12, color: C.green, background: "rgba(52,211,153,0.08)", borderRadius: 8, padding: "8px 12px", marginBottom: 12, border: "1px solid rgba(52,211,153,0.2)" }}>
+                ✓ Les arrêts maladie sont comptés comme des jours normaux dans le solde.
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div>
+                  <label style={LS}>Début</label>
+                  <input type="date" value={sickForm.start}
+                    onChange={e => setSickForm(s => ({ ...s, start: e.target.value }))} style={IS} />
+                </div>
+                <div>
+                  <label style={LS}>Fin</label>
+                  <input type="date" value={sickForm.end}
+                    onChange={e => setSickForm(s => ({ ...s, end: e.target.value }))} style={IS} />
+                </div>
+                <div style={{ gridColumn: "1/-1" }}>
+                  <label style={LS}>Description</label>
+                  <input type="text" placeholder="Optionnel" value={sickForm.desc}
+                    onChange={e => setSickForm(s => ({ ...s, desc: e.target.value }))} style={IS} />
+                </div>
+              </div>
+              <button onClick={addSick} style={{ ...BS, width: "100%", marginTop: 14 }}>Ajouter</button>
+              {sickLeaves.length > 0 && (
+                <div style={{ marginTop: 14, display: "flex", flexDirection: "column", gap: 6 }}>
+                  {sickLeaves.map(l => (
+                    <div key={l.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: C.surfaceHigh, borderRadius: 10, padding: "10px 14px", border: `1px solid ${C.borderLight}` }}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{fmtDate(l.start)} → {fmtDate(l.end)}</div>
+                        {l.desc && <div style={{ fontSize: 12, color: C.textSub }}>{l.desc}</div>}
+                      </div>
+                      <button onClick={() => commit(undefined, undefined, undefined, sickLeaves.filter(x => x.id !== l.id), undefined, undefined)}
+                        style={{ background: "none", border: "none", color: C.textFaint, cursor: "pointer", fontSize: 20 }}>×</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Collapsible>
+          </div>
+        )}
+
+        {/* ══════════════════════════════
+            TAB 1 — HISTORIQUE
+        ══════════════════════════════ */}
+        {tab === 1 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+
+            {selectedWeeks.size > 0 && (
+              <div style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center",
+                background: C.surfaceHigh, border: `1px solid ${C.accent}`,
+                borderRadius: 14, padding: "14px 18px",
+                boxShadow: `0 6px 20px ${C.accentGlow}`,
+              }}>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 14, color: C.text }}>
+                    {selectedWeeks.size} semaine{selectedWeeks.size > 1 ? "s" : ""} sélectionnée{selectedWeeks.size > 1 ? "s" : ""}
+                  </div>
+                  <div style={{ fontSize: 12, color: C.textSub }}>
+                    {selectedWeeks.size > 1 ? `${selectedWeeks.size} fichiers PDF` : "1 fichier PDF"}
+                  </div>
+                </div>
+                <button onClick={exportPDF} style={{
+                  background: C.accent, color: "white", border: "none", borderRadius: 10,
+                  padding: "10px 18px", fontWeight: 700, cursor: "pointer", fontSize: 14, fontFamily: "inherit",
+                  boxShadow: `0 4px 14px ${C.accentGlow}`,
+                }}>
+                  📄 Exporter PDF
+                </button>
+              </div>
+            )}
+
+            {sortedWeeks.length > 1 && (
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 12 }}>
+                <button onClick={() => setSelectedWeeks(new Set(sortedWeeks))}
+                  style={{ fontSize: 12, color: C.accent, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", fontWeight: 600 }}>
+                  Tout sélectionner
+                </button>
+                {selectedWeeks.size > 0 && (
+                  <button onClick={() => setSelectedWeeks(new Set())}
+                    style={{ fontSize: 12, color: C.textSub, background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>
+                    Désélectionner
+                  </button>
+                )}
+              </div>
+            )}
+
+            {sortedWeeks.length === 0 ? (
+              <div style={{ background: C.surface, borderRadius: 18, padding: "48px 24px", textAlign: "center", border: `1px solid ${C.border}` }}>
+                <div style={{ fontSize: 40, marginBottom: 12 }}>📋</div>
+                <div style={{ fontSize: 15, fontWeight: 600, color: C.textSub, marginBottom: 6 }}>Aucun historique</div>
+                <div style={{ fontSize: 13, color: C.textFaint }}>Commencez à pointer depuis l'onglet Pointage.</div>
+              </div>
+            ) : sortedWeeks.map(ws => {
+              const wEntries = weeks[ws];
+              const wNum = getWeekNum(ws), year = ws.slice(0, 4);
+              const bal = weekBalance(ws);
+              const isSelected = selectedWeeks.has(ws);
+              const isExpanded = expandedWeeks.has(ws);
+              const toggleSel = () => setSelectedWeeks(s => { const n = new Set(s); n.has(ws) ? n.delete(ws) : n.add(ws); return n; });
+              const toggleExp = () => setExpandedWeeks(s => { const n = new Set(s); n.has(ws) ? n.delete(ws) : n.add(ws); return n; });
+
+              return (
+                <div key={ws} style={{
+                  background: C.surface, borderRadius: 16, overflow: "hidden",
+                  border: `1px solid ${isSelected ? C.accent : C.border}`,
+                  boxShadow: isSelected ? `0 0 0 3px ${C.accentGlow}` : "none",
+                  transition: "all 0.15s",
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", padding: "14px 16px", gap: 12 }}>
+                    <button onClick={toggleSel} style={{
+                      width: 26, height: 26, borderRadius: "50%", flexShrink: 0, cursor: "pointer",
+                      border: `2px solid ${isSelected ? C.accent : C.border}`,
+                      background: isSelected ? C.accent : "transparent",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      transition: "all 0.15s",
+                    }}>
+                      {isSelected && <span style={{ color: "white", fontSize: 14, lineHeight: 1 }}>✓</span>}
+                    </button>
+                    <div style={{ flex: 1, cursor: "pointer" }} onClick={toggleExp}>
+                      <div style={{ fontWeight: 700, fontSize: 15, color: C.text }}>Semaine {wNum} · {year}</div>
+                      <div style={{ fontSize: 12, color: C.textSub, marginTop: 2 }}>
+                        {wEntries.filter(e => !e.isHoliday).length} pointage{wEntries.filter(e => !e.isHoliday).length !== 1 ? "s" : ""}
+                        {wEntries.some(e => e.isHoliday) && ` · ${wEntries.filter(e => e.isHoliday).length} férié${wEntries.filter(e => e.isHoliday).length > 1 ? "s" : ""}`}
+                        {" · à partir du "}{fmtDate(ws)}
+                      </div>
+                    </div>
+                    <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 16, fontWeight: 600, color: bal >= 0 ? C.green : C.red }}>
+                      {fmtHours(bal)}
+                    </div>
+                    <button onClick={toggleExp}
+                      style={{ background: "none", border: "none", cursor: "pointer", color: C.textFaint, fontSize: 12, padding: 4 }}>
+                      {isExpanded ? "▲" : "▼"}
+                    </button>
+                  </div>
+
+                  {isExpanded && (
+                    <div style={{ borderTop: `1px solid ${C.border}` }}>
+                      {[...wEntries].sort((a, b) => a.date.localeCompare(b.date)).map((e, idx, arr) => {
+                        const raw    = e.isHoliday ? settings.hoursPerDay : calcWorked(e.arrival, e.departure, e.brk);
+                        const worked = calcWorkedE(e, settings.hoursPerDay);
+                        const diff   = worked - expectedHours(e, settings.hoursPerDay);
+                        const bonus  = !e.isHoliday && isBonusDay(e.date) && e.type !== "rattrapage";
+                        return (
+                          <div key={e.id} style={{
+                            display: "flex", justifyContent: "space-between", alignItems: "center",
+                            padding: "12px 16px",
+                            borderBottom: idx < arr.length - 1 ? `1px solid ${C.borderLight}` : "none",
+                            background: e.isHoliday ? "rgba(74,222,128,0.04)" : "transparent",
+                          }}>
+                            <div>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 2 }}>
+                                <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{fmtDate(e.date)}</span>
+                                <span style={{ fontSize: 11, padding: "2px 8px", borderRadius: 999, background: TYPE_BG[e.type], color: TYPE_FG[e.type], fontWeight: 600 }}>
+                                  {TYPE_LABELS[e.type]}
+                                </span>
+                                {bonus && <span style={{ fontSize: 10, background: "#422006", color: "#fb923c", borderRadius: 5, padding: "1px 5px", fontWeight: 700 }}>×2</span>}
+                              </div>
+                              <div style={{ fontSize: 12, color: C.textSub }}>
+                                {e.isHoliday
+                                  ? <span style={{ color: TYPE_FG.ferie, fontStyle: "italic" }}>🇫🇷 {e.name}</span>
+                                  : e.isLeave
+                                  ? <span style={{ color: TYPE_FG[e.leaveType], fontStyle: "italic" }}>
+                                      {e.leaveType === "maladie" ? "🏥" : "🏖️"} Absence justifiée
+                                    </span>
+                                  : e.isMissing
+                                  ? <span style={{ color: TYPE_FG.absent, fontStyle: "italic" }}>⚠️ Aucun pointage enregistré</span>
+                                  : e.type === "rattrapage"
+                                  ? <span style={{ color: TYPE_FG.rattrapage, fontStyle: "italic" }}>🛌 {fmtWorked(raw)} de repos pris en compensation</span>
+                                  : <>{e.arrival} → {e.departure}{e.brk > 0 ? ` · ${e.brk}min pause` : ""}{e.note ? ` · ${e.note}` : ""}</>
+                                }
+                              </div>
+                            </div>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                              <div style={{ textAlign: "right" }}>
+                                <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 14, fontWeight: 600, color: diff >= 0 ? C.green : C.red }}>
+                                  {fmtHours(diff)}
+                                </div>
+                                <div style={{ fontSize: 11, color: C.textFaint }}>
+                                  {bonus ? `${fmtWorked(raw)} × 2` : fmtWorked(raw)}
+                                </div>
+                              </div>
+                              {!e.isHoliday && (
+                                <button onClick={() => commit(entries.filter(x => x.id !== e.id), undefined, undefined, undefined, undefined, undefined)}
+                                  style={{ background: "none", border: "none", color: C.textFaint, cursor: "pointer", fontSize: 18, lineHeight: 1, padding: "0 2px" }}>×</button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                      <div style={{ padding: "10px 16px", background: C.surfaceHigh, display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                        <span style={{ color: C.textSub }}>
+                          {(() => {
+                            const otBonus = calcWeekOTBonus(wEntries, settings.hoursPerDay, settings.weeklyThreshold);
+                            return otBonus > 0
+                              ? <>Total {fmtWorked(wEntries.reduce((acc, e) => acc + calcWorkedE(e, settings.hoursPerDay), 0))} · <span style={{ color: "#fb923c" }}>HS +{fmtWorked(otBonus)}</span></>
+                              : <>Total : {fmtWorked(wEntries.reduce((acc, e) => acc + calcWorkedE(e, settings.hoursPerDay), 0))}</>;
+                          })()}
+                        </span>
+                        <span style={{ fontFamily: "'DM Mono',monospace", fontWeight: 700, color: bal >= 0 ? C.green : C.red }}>
+                          Solde {fmtHours(bal)}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ══════════════════════════════
+            TAB 2 — PARAMÈTRES
+        ══════════════════════════════ */}
+        {tab === 2 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+
+            {/* Contrat */}
+            <SCard title="📄 Contrat de travail">
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                <div>
+                  <label style={LS}>Heures théoriques par jour</label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 4 }}>
+                    <input type="number" step="0.5" min="1" max="24" value={settings.hoursPerDay}
+                      onChange={e => commit(undefined, undefined, undefined, undefined, undefined, { ...settings, hoursPerDay: Number(e.target.value) })}
+                      style={{ ...IS, maxWidth: 90, marginTop: 0 }} />
+                    <span style={{ fontSize: 13, color: C.textSub }}>heures / jour</span>
+                  </div>
+                </div>
+                <div>
+                  <label style={LS}>Seuil heures supplémentaires / semaine</label>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 4 }}>
+                    <input type="number" step="0.5" min="1" value={settings.weeklyThreshold}
+                      onChange={e => commit(undefined, undefined, undefined, undefined, undefined, { ...settings, weeklyThreshold: Number(e.target.value) })}
+                      style={{ ...IS, maxWidth: 90, marginTop: 0 }} />
+                    <span style={{ fontSize: 13, color: C.textSub }}>heures / semaine</span>
+                  </div>
+                </div>
+                <div>
+                  <label style={LS}>Date de début du contrat</label>
+                  <input type="date" value={settings.contractStartDate}
+                    onChange={e => commit(undefined, undefined, undefined, undefined, undefined, { ...settings, contractStartDate: e.target.value })}
+                    style={IS} />
+                </div>
+              </div>
+            </SCard>
+
+            {/* Arrondi */}
+            <SCard title="🕐 Arrondi du pointage">
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                <RoundPicker
+                  label="Arrivée"
+                  value={settings.arrivalRounding}
+                  onChange={v => commit(undefined, undefined, undefined, undefined, undefined, { ...settings, arrivalRounding: v })}
+                />
+                <RoundPicker
+                  label="Départ"
+                  value={settings.departureRounding}
+                  onChange={v => commit(undefined, undefined, undefined, undefined, undefined, { ...settings, departureRounding: v })}
+                />
+                <div style={{ fontSize: 12, color: C.textFaint, lineHeight: 1.7, borderTop: `1px solid ${C.border}`, paddingTop: 12 }}>
+                  <span style={{ color: C.textSub, fontWeight: 600 }}>Pas d'arrondi</span> : heure exacte du pointage<br />
+                  <span style={{ color: C.textSub, fontWeight: 600 }}>Arrondi bas</span> : 8h47 → 8h45 · 9h08 → 9h00<br />
+                  <span style={{ color: C.textSub, fontWeight: 600 }}>Arrondi haut</span> : 8h47 → 9h00 · 9h08 → 9h15<br />
+                  <span style={{ color: C.textSub, fontWeight: 600 }}>Plus proche</span> : 8h47 → 8h45 · 9h08 → 9h15
+                </div>
+              </div>
+            </SCard>
+
+            {/* Données */}
+            <SCard title="💾 Sauvegarde & Restauration">
+              <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 6, fontSize: 13, color: C.textSub, marginBottom: 16, background: C.surfaceHigh, borderRadius: 10, padding: "10px 14px", border: `1px solid ${C.border}` }}>
+                <span>📌 {entries.length} pointage{entries.length !== 1 ? "s" : ""}</span>
+                <span>💶 {paidOT.length} HS payée{paidOT.length !== 1 ? "s" : ""}</span>
+                <span>🏖️ {leaves.length} congé{leaves.length !== 1 ? "s" : ""}</span>
+                <span>🏥 {sickLeaves.length} arrêt{sickLeaves.length !== 1 ? "s" : ""}</span>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <button onClick={exportJSON} style={{ ...BS, width: "100%", display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
+                  ⬇ Exporter les données (JSON)
+                </button>
+                <label style={{ ...BS, width: "100%", boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "center", gap: 8, background: C.surfaceHigh, boxShadow: "none", border: `1px solid ${C.border}`, cursor: "pointer", color: C.text }}>
+                  ⬆ Importer des données (JSON)
+                  <input ref={importRef} type="file" accept=".json" onChange={handleImport} style={{ display: "none" }} />
+                </label>
+                <div style={{ fontSize: 11, color: C.textFaint, textAlign: "center" }}>
+                  L'import remplace toutes les données existantes
+                </div>
+              </div>
+            </SCard>
+          </div>
+        )}
+      </div>
+
+      <style>{`
+        input:focus, select:focus { outline: none !important; border-color: ${C.accent} !important; box-shadow: 0 0 0 3px ${C.accentGlow} !important; }
+        button { transition: transform .1s, opacity .1s; }
+        button:active { transform: scale(.97); }
+        * { -webkit-tap-highlight-color: transparent; }
+        select option { background: ${C.surface}; color: ${C.text}; }
+        ::-webkit-scrollbar { width: 6px; } 
+        ::-webkit-scrollbar-track { background: ${C.bg}; }
+        ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 3px; }
+      `}</style>
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App));
+document.getElementById('loading').style.opacity = '0';
+setTimeout(() => document.getElementById('loading').remove(), 300);
+</script>
+
+</body>
+</html>
