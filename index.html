@@ -557,6 +557,11 @@ function App() {
         return acc + calcWorked(e.arrival, e.departure, e.brk);
       }, 0);
 
+      // Solde cumulé des semaines STRICTEMENT antérieures à la semaine exportée
+      const previousBalance = Object.keys(weeks)
+        .filter(w => w < ws)
+        .reduce((acc, w) => acc + weekBalance(w), 0);
+
       /* ── Lignes du tableau ── */
       const rows = wEntries.map(e => {
         const worked = calcWorkedE(e, settings.hoursPerDay);
@@ -734,9 +739,9 @@ footer{margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0;font-size:10p
   </div>
   <div class="cumul-card">
     <div class="lbl">Solde total cumulé</div>
-    <div class="breakdown">Sem. précédentes &nbsp;${fmtHours(balance - bal)}<br>Sem. ${wNum} (cette sem.) ${fmtHours(bal)}</div>
-    <div class="val">${fmtHours(balance)}</div>
-    <div class="val-label">depuis le début du contrat</div>
+    <div class="breakdown">Sem. précédentes &nbsp;${fmtHours(previousBalance)}<br>Sem. ${wNum} (cette sem.) ${fmtHours(bal)}</div>
+    <div class="val">${fmtHours(previousBalance + bal)}</div>
+    <div class="val-label">cumul sem. 1 → sem. ${wNum}</div>
   </div>
 </div>
 <footer>
