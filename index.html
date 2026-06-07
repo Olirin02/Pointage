@@ -274,7 +274,8 @@ const isOffDay = (dateStr, settings) => {
 };
 
 // Calcule les heures d'une entrée avec majoration éventuelle
-const calcWorkedE = (e, hoursPerDay) => {
+const calcWorkedE = (e, settings) => {
+  const hoursPerDay = getHoursPerDay(e.date, settings);
   if (e.isHoliday || e.isLeave) return hoursPerDay; // férié/congé/maladie = journée normale
   if (e.isMissing || e.isOffDay) return 0;           // absent ou repos hebdo = 0h
   if (e.type === "rattrapage") return 0;             // repos pris en compensation = 0h produites
@@ -286,7 +287,8 @@ const calcWorkedE = (e, hoursPerDay) => {
 // Sam/Dim = 0 (hors contrat), Lun-Ven et entrées virtuelles = hoursPerDay
 // Rattrapage = heures de repos prises (déduit du solde)
 // isOffDay = 0 (jour de repos hebdo 4j/sem, rien d'attendu)
-const expectedHours = (e, hoursPerDay) => {
+const expectedHours = (e, settings) => {
+  const hoursPerDay = getHoursPerDay(e.date, settings);
   if (e.isHoliday || e.isLeave || e.isMissing) return hoursPerDay;
   if (e.isOffDay) return 0;
   if (e.type === "rattrapage") return calcWorked(e.arrival, e.departure, e.brk);
