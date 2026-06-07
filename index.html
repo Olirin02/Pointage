@@ -199,12 +199,42 @@ const buildLeaveVirtualEntries = (entries, leaves, sickLeaves, holidayEntries) =
   return result;
 };
 
+// Retourne le hoursPerDay applicable à une date donnée (gestion de l'avenant)
+const getHoursPerDay = (date, settings) => {
+  if (settings.changeDate && date >= settings.changeDate && settings.newHoursPerDay)
+    return settings.newHoursPerDay;
+  return settings.hoursPerDay;
+};
+
+// Génère les entrées virtuelles de repos hebdomadaire (jour fixe de la semaine de 4 jours)
+const buildOffDayEntries = (entries, holidayEntries, leaveEntries, settings) => {
+  if (!settings.changeDate || !settings.offDayOfWeek) return [];
+  const blocked = new Set([
+    ...entries.map(e => e.date),
+    ...holidayEntries.map(e => e.date),
+    ...leaveEntries.map(e => e.date),
+  ]);
+  const start = new Date(settings.changeDate + "T12:00:00");
+  const today = new Date(todayStr() + "T12:00:00");
+  const result = [];
+  const cur = new Date(start);
+  while (cur <= today) {
+    const dateStr = d2s(cur);
+    if (cur.getDay() === settings.offDayOfWeek && !blocked.has(dateStr)) {
+      result.push({ id: `repos_${dateStr}`, date: dateStr, isOffDay: true, type: "repos" });
+    }
+    cur.setDate(cur.getDate() + 1);
+  }
+  return result;
+};
+
 // Génère les entrées virtuelles pour les jours ouvrés non pointés (contribution −hoursPerDay)
-const buildMissingDayEntries = (entries, holidayEntries, leaveEntries, settings) => {
+const buildMissingDayEntries = (entries, holidayEntries, leaveEntries, offDayEntries, settings) => {
   const accounted = new Set([
     ...entries.map(e => e.date),
     ...holidayEntries.map(e => e.date),
     ...leaveEntries.map(e => e.date),
+    ...offDayEntries.map(e => e.date),
   ]);
   const start = new Date(settings.contractStartDate + "T12:00:00");
   const today = new Date(todayStr() + "T12:00:00");
@@ -213,7 +243,8 @@ const buildMissingDayEntries = (entries, holidayEntries, leaveEntries, settings)
   while (cur <= today) {
     const dateStr = d2s(cur);
     const dow = cur.getDay();
-    if (dow !== 0 && dow !== 6 && !accounted.has(dateStr)) {
+    const skipOffDay = isOffDay(dateStr, settings);
+    if (dow !== 0 && dow !== 6 && !skipOffDay && !accounted.has(dateStr)) {
       result.push({ id: `absent_${dateStr}`, date: dateStr, isMissing: true, type: "absent" });
     }
     cur.setDate(cur.getDate() + 1);
@@ -228,10 +259,24 @@ const isBonusDay = date => {
   return date in getFrenchHolidays(dt.getFullYear());
 };
 
+// Taux horaire journalier selon la période de contrat
+const getHoursPerDay = (dateStr, settings) => {
+  if (settings.changeDate && dateStr >= settings.changeDate && settings.newHoursPerDay)
+    return settings.newHoursPerDay;
+  return settings.hoursPerDay;
+};
+
+// Jour de repos hebdomadaire dans la nouvelle période
+const isOffDay = (dateStr, settings) => {
+  if (!settings.changeDate || !settings.offDayOfWeek) return false;
+  if (dateStr < settings.changeDate) return false;
+  return new Date(dateStr + "T12:00:00").getDay() === Number(settings.offDayOfWeek);
+};
+
 // Calcule les heures d'une entrée avec majoration éventuelle
 const calcWorkedE = (e, hoursPerDay) => {
   if (e.isHoliday || e.isLeave) return hoursPerDay; // férié/congé/maladie = journée normale
-  if (e.isMissing) return 0;                         // jour non pointé = 0h travaillées
+  if (e.isMissing || e.isOffDay) return 0;           // absent ou repos hebdo = 0h
   if (e.type === "rattrapage") return 0;             // repos pris en compensation = 0h produites
   const raw = calcWorked(e.arrival, e.departure, e.brk);
   return isBonusDay(e.date) ? raw * 2 : raw;
@@ -240,8 +285,10 @@ const calcWorkedE = (e, hoursPerDay) => {
 // Heures attendues pour une entrée :
 // Sam/Dim = 0 (hors contrat), Lun-Ven et entrées virtuelles = hoursPerDay
 // Rattrapage = heures de repos prises (déduit du solde)
+// isOffDay = 0 (jour de repos hebdo 4j/sem, rien d'attendu)
 const expectedHours = (e, hoursPerDay) => {
   if (e.isHoliday || e.isLeave || e.isMissing) return hoursPerDay;
+  if (e.isOffDay) return 0;
   if (e.type === "rattrapage") return calcWorked(e.arrival, e.departure, e.brk);
   const dow = new Date(e.date + "T12:00:00").getDay();
   return (dow === 0 || dow === 6) ? 0 : hoursPerDay;
@@ -250,15 +297,16 @@ const expectedHours = (e, hoursPerDay) => {
 // Bonus hebdomadaire HS : 25 % pour H36–H43, 50 % au-delà (taux légaux français)
 // Non-cumul art. 6.14 CC IDCC 1513 : les heures dimanche/férié travaillées sont exclues
 // du calcul HS — leur majoration à 100 % s'applique à la place, pas en plus.
-const calcWeekOTBonus = (weekEntries, hoursPerDay, weeklyThreshold) => {
+const calcWeekOTBonus = (weekEntries, settings) => {
   const rawTotal = weekEntries.reduce((acc, e) => {
-    if (e.isHoliday || e.isLeave) return acc + hoursPerDay; // congé/férié → compte dans le seuil
-    if (e.isMissing)              return acc;               // absent → 0h
-    if (e.type === "rattrapage")  return acc;               // repos pris → pas d'heures travaillées
-    if (isBonusDay(e.date))       return acc;               // dimanche/férié travaillé → exclu (non-cumul)
+    const hpd = getHoursPerDay(e.date, settings);
+    if (e.isHoliday || e.isLeave) return acc + hpd;  // congé/férié → compte dans le seuil
+    if (e.isMissing || e.isOffDay) return acc;         // absent/repos → 0h
+    if (e.type === "rattrapage")  return acc;          // repos pris → pas d'heures travaillées
+    if (isBonusDay(e.date))       return acc;          // dimanche/férié travaillé → exclu (non-cumul)
     return acc + calcWorked(e.arrival, e.departure, e.brk);
   }, 0);
-  const ot = Math.max(0, rawTotal - weeklyThreshold);
+  const ot = Math.max(0, rawTotal - settings.weeklyThreshold);
   return Math.min(ot, 8) * 0.25 + Math.max(0, ot - 8) * 0.50;
 };
 
@@ -266,16 +314,19 @@ const TYPE_LABELS = {
   normal: "Normale", rattrapage: "Rattrapage", teletravail: "Télétravail",
   deplacement: "Déplacement", ferie: "Jour Férié",
   conge: "Congé payé", maladie: "Arrêt maladie", absent: "Non pointé",
+  repos: "Repos hebdo.",
 };
 const TYPE_BG = {
   normal: "#1e3a5f", rattrapage: "#3d2600", teletravail: "#0c2d48",
   deplacement: "#2d1a4a", ferie: "#14291a",
   conge: "#1a2e1a", maladie: "#2d1a00", absent: "#2d1515",
+  repos: "#1e1a3a",
 };
 const TYPE_FG = {
   normal: "#7dd3fc", rattrapage: "#fbbf24", teletravail: "#38bdf8",
   deplacement: "#c084fc", ferie: "#4ade80",
   conge: "#86efac", maladie: "#fdba74", absent: "#fca5a5",
+  repos: "#a78bfa",
 };
 const DAY_FR  = ["Dim", "Lun", "Mar", "Mer", "Jeu", "Ven", "Sam"];
 
@@ -312,6 +363,9 @@ const defaultSettings = {
   contractStartDate: todayStr(),
   arrivalRounding: "none",
   departureRounding: "none",
+  changeDate: null,
+  newHoursPerDay: 8.75,
+  offDayOfWeek: 1,
 };
 
 /* ─────────────────────────────────────────────
@@ -472,8 +526,9 @@ function App() {
 
   const holidayEntries = buildHolidayEntries(entries, settings);
   const leaveEntries   = buildLeaveVirtualEntries(entries, leaves, sickLeaves, holidayEntries);
-  const missingEntries = buildMissingDayEntries(entries, holidayEntries, leaveEntries, settings);
-  const allVirtual     = [...holidayEntries, ...leaveEntries, ...missingEntries];
+  const offDayEntries  = buildOffDayEntries(entries, holidayEntries, leaveEntries, settings);
+  const missingEntries = buildMissingDayEntries(entries, holidayEntries, leaveEntries, offDayEntries, settings);
+  const allVirtual     = [...holidayEntries, ...leaveEntries, ...offDayEntries, ...missingEntries];
 
   // Construction des semaines en premier (nécessaire pour le bonus HS hebdomadaire)
   const weeks = {};
@@ -484,8 +539,8 @@ function App() {
   });
 
   const balance =
-    [...entries, ...allVirtual].reduce((acc, e) => acc + calcWorkedE(e, settings.hoursPerDay) - expectedHours(e, settings.hoursPerDay), 0)
-    + Object.values(weeks).reduce((acc, we) => acc + calcWeekOTBonus(we, settings.hoursPerDay, settings.weeklyThreshold), 0)
+    [...entries, ...allVirtual].reduce((acc, e) => acc + calcWorkedE(e, settings) - expectedHours(e, settings), 0)
+    + Object.values(weeks).reduce((acc, we) => acc + calcWeekOTBonus(we, settings), 0)
     - paidOT.reduce((acc, o) => acc + Number(o.hours), 0);
 
   const sessionDuration = () => {
@@ -539,8 +594,8 @@ function App() {
   const sortedWeeks = Object.keys(weeks).sort((a, b) => b.localeCompare(a));
   const weekBalance = ws => {
     const we = weeks[ws];
-    return we.reduce((acc, e) => acc + calcWorkedE(e, settings.hoursPerDay) - expectedHours(e, settings.hoursPerDay), 0)
-      + calcWeekOTBonus(we, settings.hoursPerDay, settings.weeklyThreshold);
+    return we.reduce((acc, e) => acc + calcWorkedE(e, settings) - expectedHours(e, settings), 0)
+      + calcWeekOTBonus(we, settings);
   };
 
   /* ── PDF Export ── */
@@ -548,12 +603,13 @@ function App() {
     [...selectedWeeks].sort().forEach(ws => {
       const wEntries = (weeks[ws] || []).slice().sort((a, b) => a.date.localeCompare(b.date));
       const wNum = getWeekNum(ws), year = ws.slice(0, 4), bal = weekBalance(ws);
-      const otBonus     = calcWeekOTBonus(wEntries, settings.hoursPerDay, settings.weeklyThreshold);
-      const totalWorked = wEntries.reduce((acc, e) => acc + calcWorkedE(e, settings.hoursPerDay), 0);
-      const totalExpected = wEntries.reduce((acc, e) => acc + expectedHours(e, settings.hoursPerDay), 0);
+      const otBonus     = calcWeekOTBonus(wEntries, settings);
+      const totalWorked = wEntries.reduce((acc, e) => acc + calcWorkedE(e, settings), 0);
+      const totalExpected = wEntries.reduce((acc, e) => acc + expectedHours(e, settings), 0);
       const rawRegular  = wEntries.reduce((acc, e) => {
-        if (e.isHoliday || e.isLeave) return acc + settings.hoursPerDay;
-        if (e.isMissing || e.type === "rattrapage" || isBonusDay(e.date)) return acc;
+        const hpd = getHoursPerDay(e.date, settings);
+        if (e.isHoliday || e.isLeave) return acc + hpd;
+        if (e.isMissing || e.isOffDay || e.type === "rattrapage" || isBonusDay(e.date)) return acc;
         return acc + calcWorked(e.arrival, e.departure, e.brk);
       }, 0);
 
@@ -564,11 +620,12 @@ function App() {
 
       /* ── Lignes du tableau ── */
       const rows = wEntries.map(e => {
-        const worked = calcWorkedE(e, settings.hoursPerDay);
+        const hpd    = getHoursPerDay(e.date, settings);
+        const worked = calcWorkedE(e, settings);
         const raw    = calcWorked(e.arrival || "00:00", e.departure || "00:00", e.brk || 0);
-        const diff   = worked - expectedHours(e, settings.hoursPerDay);
+        const diff   = worked - expectedHours(e, settings);
         const dayStr = DAY_FR[new Date(e.date + "T12:00:00").getDay()];
-        const isBonus = !e.isHoliday && !e.isLeave && !e.isMissing && e.type !== "rattrapage" && isBonusDay(e.date);
+        const isBonus = !e.isHoliday && !e.isLeave && !e.isMissing && !e.isOffDay && e.type !== "rattrapage" && isBonusDay(e.date);
         const x2badge = isBonus ? `<span class="x2">×2</span>` : "";
         let rowClass = "", timeCols = "", workedTd = "", noteTd = "";
         if (e.isHoliday) {
@@ -581,6 +638,11 @@ function App() {
           rowClass = e.leaveType === "maladie" ? "maladie-row" : "conge-row";
           timeCols = `<td colspan="3" style="font-style:italic;color:#64748b">${em} Absence justifiée</td>`;
           workedTd = `<td class="mono">${fmtWorked(worked)}</td>`;
+          noteTd   = `<td class="note-cell">—</td>`;
+        } else if (e.isOffDay) {
+          rowClass = "offday-row";
+          timeCols = `<td colspan="3" style="color:#a78bfa;font-style:italic">🌙 Jour de repos hebdomadaire (sem. 4 jours)</td>`;
+          workedTd = `<td class="mono" style="color:#94a3b8">—</td>`;
           noteTd   = `<td class="note-cell">—</td>`;
         } else if (e.isMissing) {
           rowClass = "missing-row";
@@ -627,7 +689,7 @@ function App() {
 
       /* ── Bloc heures attendues ── */
       const expItems = wEntries.map(e => {
-        const exp = expectedHours(e, settings.hoursPerDay);
+        const exp = expectedHours(e, settings);
         const d   = DAY_FR[new Date(e.date + "T12:00:00").getDay()];
         const sfx = e.isHoliday ? " 🇫🇷" : e.isLeave ? (e.leaveType === "maladie" ? " 🏥" : " 🏖️") : e.isMissing ? " ⚠️" : e.type === "rattrapage" ? " 🛌" : new Date(e.date + "T12:00:00").getDay() === 0 ? " (dim.)" : "";
         return `${d}${sfx} <strong>${fmtWorked(exp)}</strong>`;
@@ -635,7 +697,7 @@ function App() {
 
       /* ── Grille récapitulatif ── */
       const detailItems = wEntries.map(e => {
-        const diff = calcWorkedE(e, settings.hoursPerDay) - expectedHours(e, settings.hoursPerDay);
+        const diff = calcWorkedE(e, settings) - expectedHours(e, settings);
         const d    = DAY_FR[new Date(e.date + "T12:00:00").getDay()];
         const sfx  = e.isHoliday ? " (Férié)" : e.isLeave ? (e.leaveType === "maladie" ? " (Maladie)" : " (Congé)") : e.isMissing ? " (Absent)" : e.type === "rattrapage" ? " (Rattrap.)" : new Date(e.date + "T12:00:00").getDay() === 0 ? " ×2" : "";
         return `<div class="d-item"><span class="day">${d}${sfx}</span><span class="ecart ${diff >= 0 ? "pos" : "neg"}">${fmtHours(diff)}</span></div>`;
@@ -942,9 +1004,9 @@ footer{margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0;font-size:10p
                   <div style={{ fontSize: 11, color: C.textSub, textTransform: "uppercase", letterSpacing: .8, marginBottom: 8 }}>Dernières saisies</div>
                   {[...entries].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5).map(e => {
                     const raw    = calcWorked(e.arrival, e.departure, e.brk);
-                    const worked = calcWorkedE(e, settings.hoursPerDay);
-                    const diff   = worked - expectedHours(e, settings.hoursPerDay);
-                    const bonus  = isBonusDay(e.date) && e.type !== "rattrapage";
+                    const worked = calcWorkedE(e, settings);
+                    const diff   = worked - expectedHours(e, settings);
+                    const bonus  = !e.isOffDay && isBonusDay(e.date) && e.type !== "rattrapage";
                     return (
                       <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: C.surfaceHigh, borderRadius: 10, padding: "10px 14px", marginBottom: 6, border: `1px solid ${C.borderLight}` }}>
                         <div>
@@ -1200,10 +1262,10 @@ footer{margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0;font-size:10p
                   {isExpanded && (
                     <div style={{ borderTop: `1px solid ${C.border}` }}>
                       {[...wEntries].sort((a, b) => a.date.localeCompare(b.date)).map((e, idx, arr) => {
-                        const raw    = e.isHoliday ? settings.hoursPerDay : calcWorked(e.arrival, e.departure, e.brk);
-                        const worked = calcWorkedE(e, settings.hoursPerDay);
-                        const diff   = worked - expectedHours(e, settings.hoursPerDay);
-                        const bonus  = !e.isHoliday && isBonusDay(e.date) && e.type !== "rattrapage";
+                        const raw    = e.isHoliday ? getHoursPerDay(e.date, settings) : calcWorked(e.arrival, e.departure, e.brk);
+                        const worked = calcWorkedE(e, settings);
+                        const diff   = worked - expectedHours(e, settings);
+                        const bonus  = !e.isHoliday && !e.isOffDay && isBonusDay(e.date) && e.type !== "rattrapage";
                         return (
                           <div key={e.id} style={{
                             display: "flex", justifyContent: "space-between", alignItems: "center",
@@ -1228,6 +1290,8 @@ footer{margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0;font-size:10p
                                     </span>
                                   : e.isMissing
                                   ? <span style={{ color: TYPE_FG.absent, fontStyle: "italic" }}>⚠️ Aucun pointage enregistré</span>
+                                  : e.isOffDay
+                                  ? <span style={{ color: TYPE_FG.repos, fontStyle: "italic" }}>🌙 Jour de repos hebdomadaire</span>
                                   : e.type === "rattrapage"
                                   ? <span style={{ color: TYPE_FG.rattrapage, fontStyle: "italic" }}>🛌 {fmtWorked(raw)} de repos pris en compensation</span>
                                   : <>{e.arrival} → {e.departure}{e.brk > 0 ? ` · ${e.brk}min pause` : ""}{e.note ? ` · ${e.note}` : ""}</>
@@ -1254,10 +1318,10 @@ footer{margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0;font-size:10p
                       <div style={{ padding: "10px 16px", background: C.surfaceHigh, display: "flex", justifyContent: "space-between", fontSize: 13 }}>
                         <span style={{ color: C.textSub }}>
                           {(() => {
-                            const otBonus = calcWeekOTBonus(wEntries, settings.hoursPerDay, settings.weeklyThreshold);
+                            const otBonus = calcWeekOTBonus(wEntries, settings);
                             return otBonus > 0
-                              ? <>Total {fmtWorked(wEntries.reduce((acc, e) => acc + calcWorkedE(e, settings.hoursPerDay), 0))} · <span style={{ color: "#fb923c" }}>HS +{fmtWorked(otBonus)}</span></>
-                              : <>Total : {fmtWorked(wEntries.reduce((acc, e) => acc + calcWorkedE(e, settings.hoursPerDay), 0))}</>;
+                              ? <>Total {fmtWorked(wEntries.reduce((acc, e) => acc + calcWorkedE(e, settings), 0))} · <span style={{ color: "#fb923c" }}>HS +{fmtWorked(otBonus)}</span></>
+                              : <>Total : {fmtWorked(wEntries.reduce((acc, e) => acc + calcWorkedE(e, settings), 0))}</>;
                           })()}
                         </span>
                         <span style={{ fontFamily: "'DM Mono',monospace", fontWeight: 700, color: bal >= 0 ? C.green : C.red }}>
@@ -1308,7 +1372,68 @@ footer{margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0;font-size:10p
               </div>
             </SCard>
 
-            {/* Arrondi */}
+            {/* Changement de contrat */}
+            <SCard title="🔄 Changement de contrat">
+              <div style={{ fontSize: 12, color: C.textSub, background: C.surfaceHigh, borderRadius: 8, padding: "8px 12px", marginBottom: 14, border: `1px solid ${C.border}` }}>
+                Permet de passer à un nouveau rythme (ex. semaine de 4 jours) à partir d'une date, sans impacter l'historique passé.
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: settings.changeDate ? 16 : 0 }}>
+                <div>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>Activer un changement de rythme</div>
+                  <div style={{ fontSize: 12, color: C.textSub, marginTop: 3 }}>
+                    {settings.changeDate
+                      ? `Actif depuis le ${fmtDate(settings.changeDate)} · ${settings.newHoursPerDay}h/jour`
+                      : "Désactivé"}
+                  </div>
+                </div>
+                <Toggle
+                  value={!!settings.changeDate}
+                  onChange={v => commit(undefined, undefined, undefined, undefined, undefined, {
+                    ...settings,
+                    changeDate: v ? (settings.changeDate || todayStr()) : "",
+                  })}
+                />
+              </div>
+
+              {settings.changeDate && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                  <div>
+                    <label style={LS}>Date d'effet</label>
+                    <input type="date" value={settings.changeDate}
+                      onChange={e => commit(undefined, undefined, undefined, undefined, undefined, { ...settings, changeDate: e.target.value })}
+                      style={IS} />
+                  </div>
+                  <div>
+                    <label style={LS}>Nouvelles heures théoriques par jour</label>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 4 }}>
+                      <input type="number" step="0.25" min="1" max="24" value={settings.newHoursPerDay}
+                        onChange={e => commit(undefined, undefined, undefined, undefined, undefined, { ...settings, newHoursPerDay: Number(e.target.value) })}
+                        style={{ ...IS, maxWidth: 90, marginTop: 0 }} />
+                      <span style={{ fontSize: 13, color: C.textSub }}>heures / jour</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label style={LS}>Jour de repos hebdomadaire</label>
+                    <select value={settings.offDayOfWeek}
+                      onChange={e => commit(undefined, undefined, undefined, undefined, undefined, { ...settings, offDayOfWeek: Number(e.target.value) })}
+                      style={IS}>
+                      <option value="0">Aucun (semaine de 5 jours)</option>
+                      <option value="1">Lundi</option>
+                      <option value="2">Mardi</option>
+                      <option value="3">Mercredi</option>
+                      <option value="4">Jeudi</option>
+                      <option value="5">Vendredi</option>
+                    </select>
+                  </div>
+                  <div style={{ fontSize: 12, color: C.green, background: "rgba(52,211,153,0.08)", borderRadius: 8, padding: "8px 12px", border: "1px solid rgba(52,211,153,0.2)" }}>
+                    ✓ À partir du {fmtDate(settings.changeDate)} : {settings.newHoursPerDay}h/jour,
+                    {settings.offDayOfWeek > 0
+                      ? ` ${["","Lundi","Mardi","Mercredi","Jeudi","Vendredi"][settings.offDayOfWeek]} = jour de repos (0h attendu)`
+                      : " 5 jours/semaine"}
+                  </div>
+                </div>
+              )}
+            </SCard>
             <SCard title="🕐 Arrondi du pointage">
               <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
                 <RoundPicker
@@ -1327,6 +1452,56 @@ footer{margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0;font-size:10p
                   <span style={{ color: C.textSub, fontWeight: 600 }}>Arrondi haut</span> : 8h47 → 9h00 · 9h08 → 9h15<br />
                   <span style={{ color: C.textSub, fontWeight: 600 }}>Plus proche</span> : 8h47 → 8h45 · 9h08 → 9h15
                 </div>
+              </div>
+            </SCard>
+
+            {/* Avenant contrat */}
+            <SCard title="📋 Avenant — Semaine de 4 jours">
+              <div style={{ fontSize: 12, color: "#a78bfa", background: "rgba(167,139,250,0.08)", borderRadius: 8, padding: "8px 12px", marginBottom: 14, border: "1px solid rgba(167,139,250,0.2)" }}>
+                Les changements s'appliquent uniquement aux dates à partir de la date d'effet. L'historique antérieur reste inchangé.
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                <div>
+                  <label style={LS}>Date d'effet de l'avenant</label>
+                  <input type="date" value={settings.changeDate || ""}
+                    onChange={e => commit(undefined, undefined, undefined, undefined, undefined, { ...settings, changeDate: e.target.value || null })}
+                    style={IS} />
+                  {settings.changeDate && (
+                    <button onClick={() => commit(undefined, undefined, undefined, undefined, undefined, { ...settings, changeDate: null })}
+                      style={{ fontSize: 11, color: C.textFaint, background: "none", border: "none", cursor: "pointer", marginTop: 4, fontFamily: "inherit" }}>
+                      × Supprimer l'avenant
+                    </button>
+                  )}
+                </div>
+                {settings.changeDate && (<>
+                  <div>
+                    <label style={LS}>Nouvelles heures par jour</label>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginTop: 4 }}>
+                      <input type="number" step="0.25" min="1" max="24" value={settings.newHoursPerDay}
+                        onChange={e => commit(undefined, undefined, undefined, undefined, undefined, { ...settings, newHoursPerDay: Number(e.target.value) })}
+                        style={{ ...IS, maxWidth: 90, marginTop: 0 }} />
+                      <span style={{ fontSize: 13, color: C.textSub }}>h / jour (ex : 8.75 = 8h45)</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label style={LS}>Jour de repos fixe</label>
+                    <div style={{ display: "flex", gap: 6, marginTop: 6, flexWrap: "wrap" }}>
+                      {[["Aucun", null],[" Lun", 1],["Mar", 2],["Mer", 3],["Jeu", 4],["Ven", 5]].map(([label, val]) => (
+                        <button key={String(val)} onClick={() => commit(undefined, undefined, undefined, undefined, undefined, { ...settings, offDayOfWeek: val })}
+                          style={{
+                            flex: 1, padding: "7px 4px", borderRadius: 9, border: `1px solid ${settings.offDayOfWeek === val ? "#a78bfa" : C.border}`,
+                            cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600, transition: "all 0.15s",
+                            background: settings.offDayOfWeek === val ? "rgba(167,139,250,0.2)" : C.surfaceHigh,
+                            color: settings.offDayOfWeek === val ? "#a78bfa" : C.textSub,
+                          }}>{label}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{ fontSize: 12, color: C.textSub, background: C.surfaceHigh, borderRadius: 8, padding: "8px 12px", border: `1px solid ${C.border}` }}>
+                    À partir du <strong>{settings.changeDate}</strong> : <strong>{settings.newHoursPerDay}h/jour</strong>
+                    {settings.offDayOfWeek ? <>, repos le <strong>{["","Lun","Mar","Mer","Jeu","Ven"][settings.offDayOfWeek]}</strong></> : ""}
+                  </div>
+                </>)}
               </div>
             </SCard>
 
