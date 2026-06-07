@@ -259,13 +259,6 @@ const isBonusDay = date => {
   return date in getFrenchHolidays(dt.getFullYear());
 };
 
-// Taux horaire journalier selon la période de contrat
-const getHoursPerDay = (dateStr, settings) => {
-  if (settings.changeDate && dateStr >= settings.changeDate && settings.newHoursPerDay)
-    return settings.newHoursPerDay;
-  return settings.hoursPerDay;
-};
-
 // Jour de repos hebdomadaire dans la nouvelle période
 const isOffDay = (dateStr, settings) => {
   if (!settings.changeDate || !settings.offDayOfWeek) return false;
