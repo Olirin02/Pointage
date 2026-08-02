@@ -285,6 +285,7 @@ const expectedHours = (e, settings) => {
   if (e.isHoliday || e.isLeave || e.isMissing) return hoursPerDay;
   if (e.isOffDay) return 0;
   if (e.type === "rattrapage") return calcWorked(e.arrival, e.departure, e.brk);
+  if (e.type === "rappel") return 0; // rappel vacances → rien d'attendu, tout compte en bonus
   const dow = new Date(e.date + "T12:00:00").getDay();
   return (dow === 0 || dow === 6) ? 0 : hoursPerDay;
 };
@@ -309,19 +310,19 @@ const TYPE_LABELS = {
   normal: "Normale", rattrapage: "Rattrapage", teletravail: "Télétravail",
   deplacement: "Déplacement", ferie: "Jour Férié",
   conge: "Congé payé", maladie: "Arrêt maladie", absent: "Non pointé",
-  repos: "Repos hebdo.",
+  repos: "Repos hebdo.", rappel: "Rappel vacances",
 };
 const TYPE_BG = {
   normal: "#1e3a5f", rattrapage: "#3d2600", teletravail: "#0c2d48",
   deplacement: "#2d1a4a", ferie: "#14291a",
   conge: "#1a2e1a", maladie: "#2d1a00", absent: "#2d1515",
-  repos: "#1e1a3a",
+  repos: "#1e1a3a", rappel: "#0c2a2a",
 };
 const TYPE_FG = {
   normal: "#7dd3fc", rattrapage: "#fbbf24", teletravail: "#38bdf8",
   deplacement: "#c084fc", ferie: "#4ade80",
   conge: "#86efac", maladie: "#fdba74", absent: "#fca5a5",
-  repos: "#a78bfa",
+  repos: "#a78bfa", rappel: "#2dd4bf",
 };
 const DAY_FR  = ["Dim", "Lun", "Mar", "Mer", "Jeu", "Ven", "Sam"];
 
