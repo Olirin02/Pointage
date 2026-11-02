@@ -38,9 +38,7 @@
 </div>
 <div id="root"></div>
 <script type="text/babel" data-presets="react">
-const { useState, useEffect, useRef } = React;
-
-
+import { useState, useEffect, useRef } from "react";
 
 /* ─────────────────────────────────────────────
    UTILITIES
@@ -283,7 +281,7 @@ const calcWorkedE = (e, settings) => {
 const expectedHours = (e, settings) => {
   const hoursPerDay = getHoursPerDay(e.date, settings);
   if (e.isHoliday || e.isLeave || e.isMissing) return hoursPerDay;
-  if (e.isOffDay) return 0;
+  if (e.isOffDay || isOffDay(e.date, settings)) return 0;
   if (e.type === "rattrapage") return calcWorked(e.arrival, e.departure, e.brk);
   if (e.type === "rappel") return 0; // rappel vacances → rien d'attendu, tout compte en bonus
   const dow = new Date(e.date + "T12:00:00").getDay();
@@ -491,23 +489,24 @@ function App() {
   }, []);
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const d = JSON.parse(raw);
-        if (d.entries)     setEntries(d.entries);
-        if (d.paidOT)      setPaidOT(d.paidOT);
-        if (d.leaves)      setLeaves(d.leaves);
-        if (d.sickLeaves)  setSickLeaves(d.sickLeaves);
-        if (d.session)     setSession(d.session);
-        if (d.settings)    setSettings({ ...defaultSettings, ...d.settings });
-      }
-    } catch (_) {}
+    (async () => {
+      try {
+        const res = await window.storage.get(STORAGE_KEY);
+        if (res?.value) {
+          const d = JSON.parse(res.value);
+          if (d.entries)     setEntries(d.entries);
+          if (d.paidOT)      setPaidOT(d.paidOT);
+          if (d.leaves)      setLeaves(d.leaves);
+          if (d.sickLeaves)  setSickLeaves(d.sickLeaves);
+          if (d.session)     setSession(d.session);
+          if (d.settings)    setSettings({ ...defaultSettings, ...d.settings });
+        }
+      } catch (_) {}
+    })();
   }, []);
 
-  const persist = (e, po, lv, sl, se, st) => {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ entries: e, paidOT: po, leaves: lv, sickLeaves: sl, session: se, settings: st })); } catch(_) {}
-  };
+  const persist = (e, po, lv, sl, se, st) =>
+    window.storage.set(STORAGE_KEY, JSON.stringify({ entries: e, paidOT: po, leaves: lv, sickLeaves: sl, session: se, settings: st })).catch(() => {});
 
   const commit = (ne, npo, nlv, nsl, nse, nst) => {
     const e  = ne  !== undefined ? ne  : entries;
@@ -1540,11 +1539,6 @@ footer{margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0;font-size:10p
   );
 }
 
-
-const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(React.createElement(App));
-document.getElementById('loading').style.opacity = '0';
-setTimeout(() => document.getElementById('loading').remove(), 300);
 </script>
 </body>
 </html>
