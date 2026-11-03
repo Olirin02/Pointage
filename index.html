@@ -38,7 +38,7 @@
 </div>
 <div id="root"></div>
 <script type="text/babel" data-presets="react">
-import { useState, useEffect, useRef } from "react";
+const { useState, useEffect, useRef } = React;
 
 /* ─────────────────────────────────────────────
    UTILITIES
@@ -489,8 +489,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    (async () => {
-      try {
+    try {
         const raw = localStorage.getItem(STORAGE_KEY);
         if (raw) {
           const d = JSON.parse(raw);
@@ -501,12 +500,12 @@ function App() {
           if (d.session)     setSession(d.session);
           if (d.settings)    setSettings({ ...defaultSettings, ...d.settings });
         }
-      } catch (_) {}
-    })();
+    } catch (_) {}
   }, []);
 
-  const persist = (e, po, lv, sl, se, st) =>
+  const persist = (e, po, lv, sl, se, st) => {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ entries: e, paidOT: po, leaves: lv, sickLeaves: sl, session: se, settings: st })); } catch(_) {}
+  };
 
   const commit = (ne, npo, nlv, nsl, nse, nst) => {
     const e  = ne  !== undefined ? ne  : entries;
@@ -1538,7 +1537,6 @@ footer{margin-top:8px;padding-top:8px;border-top:1px solid #e2e8f0;font-size:10p
     </div>
   );
 }
-
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(React.createElement(App));
